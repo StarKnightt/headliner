@@ -10,7 +10,8 @@
     "shots": "node scripts/shots.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "verify:qloo": "node scripts/verify-qloo.mjs"
+    "verify:qloo": "node scripts/verify-qloo.mjs",
+    "eval:llm": "node scripts/eval-llm.mjs"
   },
   "dependencies": {
     "@react-three/drei": "^10.7.9",

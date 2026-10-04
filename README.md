@@ -43,11 +43,18 @@ market isn't crowded yet: a **hidden gem**.
 6. **Bill:** similar artists (`urn:entity:artist`, excluding the headliner) at peer and smaller
    popularity bands, used as co-headliners and support.
 7. **Partners and audience:** `urn:entity:brand`, `urn:demographics` and `urn:tag` insights.
-8. **Plan:** an LLM (Groq or OpenAI, tool-calling) reads the evidence and writes a *draft*. The
-   draft may only reference IDs that Qloo returned. The server hydrates every number, coordinate
-   and leg from the evidence ledger, drops anything invented (and shows what it dropped in the
-   timeline), routes the stops with nearest-neighbour plus 2-opt, and validates the result with zod.
-   Without an LLM key, a deterministic planner runs the same tools in a fixed order.
+8. **Plan:** steps 1–7 run as a fixed research pass. The LLM (Groq `openai/gpt-oss-120b` by
+   default, tool calling) then gets a compact evidence digest, with Qloo IDs swapped for short
+   aliases (`v3`, `a2`, `b1`). It picks the cities, rooms, bill and brands, and can call follow-up
+   tools (`find_venues` with a room type, `similar_artists`) before it calls `submit_tour_plan`.
+   The server checks the draft: valid IDs, the exact stop count, and the start and close cities.
+   Every number cited in a stop reason must be that stop's own Qloo number, and any "hidden gem" or
+   "stronghold" label must match its computed read. A failing draft goes back to the model once
+   for correction. The server then hydrates every number, coordinate and leg from the evidence
+   ledger, drops anything invented (the timeline shows what was dropped), routes the stops with
+   nearest-neighbour plus 2-opt, and validates the result with zod. On a rate limit it moves to
+   the next model in the chain; any other failure finishes with the deterministic planner. Without
+   an LLM key, the deterministic planner runs on its own.
 
 Each step streams to the **Soundcheck** timeline. The **Qloo calls** tab lists every request with
 its parameters, duration and result count. The key is never shown.
@@ -83,15 +90,18 @@ pnpm dev                     # http://localhost:3000
 | `pnpm test` | vitest: plan schema, hydration/anti-hallucination, routing, Qloo mapping, HTTP client, mock transport |
 | `pnpm typecheck` / `pnpm lint` / `pnpm build` | the usual |
 | `pnpm verify:qloo [artist]` | hits every Qloo endpoint Headliner uses with the real key and prints response shapes |
-| `pnpm shots [url]` | regenerates `shots/` from a running instance (uses the local Chrome) |
+| `pnpm shots [url]` | regenerates `shots/` from a running instance (uses the local Chrome, headless) |
+| `pnpm eval:llm [url] [runs]` | runs 10 artist/territory/constraint cases through `/api/plan` and scores validity, latency, tokens and fallbacks |
 
 ### Environment
 
 All variables are server-side only; none are `NEXT_PUBLIC_`. See [`.env.example`](.env.example).
 
 - `QLOO_API_KEY`: if empty, the app runs on **mock fixtures** and labels them everywhere.
-- `GROQ_API_KEY` or `OPENAI_API_KEY` (or `LLM_PROVIDER` / `LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL`
-  for any OpenAI-compatible endpoint): if none is set, the deterministic planner runs.
+- `GROQ_API_KEY` or `OPENAI_API_KEY` (or `LLM_PROVIDER` / `LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL` /
+  `LLM_FALLBACK_MODELS` for any OpenAI-compatible endpoint): if none is set, the deterministic planner runs.
+  On Groq the default chain is `openai/gpt-oss-120b` → `openai/gpt-oss-20b` → `qwen/qwen3.8-27b`.
+  Groq's free tier allows 8K tokens per minute per model, and a plan uses about 3–6K.
 
 ## Project layout
 

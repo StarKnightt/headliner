@@ -104,10 +104,21 @@ payload as a fixture in `test/qloo-client.test.ts`, and run `pnpm test`.
       each map looks plausible and that the Qloo calls tab shows no `[mock]` tags.
 - [ ] Re-tune the opportunity thresholds in `src/lib/plan/routing.ts` to the live distribution
       (mock data was tuned to produce some hidden gems; live data may not).
-- [ ] Add an LLM key (`GROQ_API_KEY` first) and confirm the model supports tool calling. The
-      default is `openai/gpt-oss-120b`; check that it is still listed on Groq. Watch the timeline
-      for "dropped" references, which mean the model tried to cite something Qloo didn't return.
-      **The LLM path has only been exercised by unit tests so far; no real model run has happened.**
+- [x] LLM planner verified on Groq with mock Qloo data (Oct 4). `pnpm eval:llm` gave **10/10
+      valid plans in two consecutive rounds**. The baseline before the redesign was 0/10: Groq's
+      8K-tokens-per-minute cap and provider-side tool-argument validation broke every run.
+
+      | Model (Groq) | Runs ending on it | Valid | Avg turns | Avg tokens | Avg LLM time |
+      | --- | --- | --- | --- | --- | --- |
+      | `openai/gpt-oss-120b` (primary) | 10 | 10 | 1.2 | 3.9K | 9.0s |
+      | `openai/gpt-oss-20b` (fallback 1) | 8 | 8 | 1.5 | 5.0K | 13.6s |
+      | `qwen/qwen3.8-27b` (fallback 2) | 2 | 2 | 2.0 | 7.0K | 14.9s |
+
+      Across the 20 runs, total time per run had a median of about 11–14s and a maximum of 33s,
+      with 2 provider-rejected tool calls (both recovered). Llama 3.3 70B and Kimi K2 aren't served
+      on this Groq account. Qwen has a 1K output-tokens-per-minute cap, so it is last resort only.
+- [ ] Re-run `pnpm eval:llm` with the live Qloo key. The reasons' claims check (every cited number
+      must be the stop's own) will catch mapping problems quickly.
 - [ ] `pnpm shots` against the live build, then replace the mock screenshots in `shots/` and the README.
       Check them for any key or personal data before committing.
 - [ ] Update the README example block with a real (redacted) request→result.
