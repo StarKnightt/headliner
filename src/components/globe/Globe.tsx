@@ -230,25 +230,126 @@ function Hotspots({ stop }: { stop: GlobeStop }) {
   );
 }
 
-/** Projects stop label anchors to screen space and positions DOM labels outside the canvas. */
-function LabelProjector({ stops, layer }: { stops: GlobeStop[]; layer: RefObject<HTMLDivElement | null> }) {
+interface Rect {
+  l: number;
+  t: number;
+  r: number;
+  b: number;
+}
+
+const LABEL_GAP = 6;
+const LABEL_PAD = 3;
+
+/** Candidate label boxes around an anchor, in preference order (offsets are relative to the anchor). */
+function candidates(x: number, y: number, w: number, h: number): Rect[] {
+  const g = LABEL_GAP;
+  const boxes: [number, number][] = [
+    [x - w / 2, y - h - 2],
+    [x + g, y - h / 2],
+    [x - g - w, y - h / 2],
+    [x + g, y - h - g],
+    [x - g - w, y - h - g],
+    [x - w / 2, y - h - 24],
+    [x + g + 16, y - h / 2 - 14],
+    [x - g - 16 - w, y - h / 2 - 14],
+  ];
+  return boxes.map(([l, t]) => ({ l, t, r: l + w, b: t + h }));
+}
+
+const overlaps = (a: Rect, b: Rect) => a.l < b.r + LABEL_PAD && a.r + LABEL_PAD > b.l && a.t < b.b + LABEL_PAD && a.b + LABEL_PAD > b.t;
+
+/**
+ * Projects stop label anchors to screen space and lays out DOM labels outside the canvas.
+ * Greedy collision avoidance: labels are placed by priority (focused stop, then affinity) at the first
+ * free candidate slot, preferring last frame's slot to avoid jitter. If nothing fits, the label collapses
+ * to its stop number. Offset labels get a leader line back to their pillar.
+ */
+function LabelProjector({ stops, focusIndex, layer }: { stops: GlobeStop[]; focusIndex: number | null; layer: RefObject<HTMLDivElement | null> }) {
   const anchors = useMemo(
-    () => stops.map((s) => ({ id: s.id, surface: latLngToVec3(s.lat, s.lng, 1), top: latLngToVec3(s.lat, s.lng, 1.07 + s.affinity * 0.2) })),
+    () =>
+      stops.map((s, i) => ({
+        id: s.id,
+        index: i,
+        affinity: s.affinity,
+        surface: latLngToVec3(s.lat, s.lng, 1),
+        top: latLngToVec3(s.lat, s.lng, 1.07 + s.affinity * 0.2),
+      })),
     [stops],
   );
+  const memory = useRef(new Map<string, { slot: number; compact: boolean; full: [number, number]; small: [number, number] }>());
+
   useFrame(({ camera, size }) => {
     const root = layer.current;
     if (!root) return;
     const camDir = _v2.copy(camera.position).normalize();
-    for (const a of anchors) {
+    const placed: Rect[] = [];
+    const order = [...anchors].sort((a, b) => (a.index === focusIndex ? -1 : b.index === focusIndex ? 1 : b.affinity - a.affinity));
+    for (const a of order) {
       const el = root.querySelector<HTMLElement>(`[data-stop="${a.id}"]`);
+      const line = root.querySelector<SVGLineElement>(`[data-leader="${a.id}"]`);
       if (!el) continue;
+      const key = `${a.id}:${a.index}`;
+      let m = memory.current.get(key);
+      if (!m || m.full[0] === 0) {
+        const chip = el.firstElementChild as HTMLElement | null;
+        const num = chip?.firstElementChild as HTMLElement | null;
+        const full: [number, number] = [chip?.offsetWidth ?? 0, chip?.offsetHeight ?? 0];
+        m = { slot: 0, compact: false, full, small: [(num?.offsetWidth ?? 14) + 12, full[1]] };
+        memory.current.set(key, m);
+      }
       const facing = camDir.dot(a.surface);
+      const opacity = Math.max(0, Math.min(1, (facing - 0.15) * 4));
       _v3.copy(a.top).project(camera);
       const x = (_v3.x * 0.5 + 0.5) * size.width;
       const y = (-_v3.y * 0.5 + 0.5) * size.height;
-      el.style.transform = `translate(-50%, -100%) translate(${x.toFixed(1)}px, ${y.toFixed(1)}px)`;
-      el.style.opacity = String(Math.max(0, Math.min(1, (facing - 0.15) * 4)));
+      if (opacity < 0.05) {
+        el.style.opacity = "0";
+        if (line) line.style.opacity = "0";
+        continue;
+      }
+
+      let chosen: Rect | null = null;
+      let compact = false;
+      for (const mode of [false, true]) {
+        const [w, h] = mode ? m.small : m.full;
+        const opts = candidates(x, y, w, h);
+        const prefer = m.compact === mode ? [m.slot, ...opts.keys()] : [...opts.keys()];
+        for (const k of prefer) {
+          if (!placed.some((p) => overlaps(p, opts[k]))) {
+            chosen = opts[k];
+            m.slot = k;
+            break;
+          }
+        }
+        if (chosen) {
+          compact = mode;
+          break;
+        }
+      }
+      if (!chosen) {
+        // Nowhere free: fall back to the compact chip in its default slot.
+        const [w, h] = m.small;
+        chosen = candidates(x, y, w, h)[0];
+        compact = true;
+        m.slot = 0;
+      }
+      m.compact = compact;
+      placed.push(chosen);
+
+      el.dataset.compact = compact ? "1" : "";
+      el.style.transform = `translate(${chosen.l.toFixed(1)}px, ${chosen.t.toFixed(1)}px)`;
+      el.style.opacity = String(opacity);
+
+      if (line) {
+        const cx = Math.max(chosen.l, Math.min(x, chosen.r));
+        const cy = Math.max(chosen.t, Math.min(y, chosen.b));
+        const far = Math.hypot(cx - x, cy - y) > 9;
+        line.setAttribute("x1", x.toFixed(1));
+        line.setAttribute("y1", y.toFixed(1));
+        line.setAttribute("x2", cx.toFixed(1));
+        line.setAttribute("y2", cy.toFixed(1));
+        line.style.opacity = far ? String(opacity * 0.7) : "0";
+      }
     }
   });
   return null;
@@ -384,7 +485,7 @@ function Scene({ markers, stops, focusIndex, home, onSelectStop, idle, layer }: 
         <Arc key={`${stops[i].id}-${s.id}`} a={stops[i]} b={s} delay={0.4 + i * 0.55} epoch={epoch} />
       ))}
       {focus && <Hotspots key={focus.id} stop={focus} />}
-      <LabelProjector stops={stops} layer={layer} />
+      <LabelProjector stops={stops} focusIndex={focusIndex} layer={layer} />
       <OrbitControls
         makeDefault
         enablePan={false}
@@ -414,17 +515,22 @@ export default function Globe(props: GlobeProps) {
       <Scene {...props} layer={layer} />
     </Canvas>
       <div ref={layer} className="pointer-events-none absolute inset-0 overflow-hidden" aria-hidden>
+        <svg className="absolute inset-0 h-full w-full">
+          {props.stops.map((s) => (
+            <line key={s.id} data-leader={s.id} stroke={OPPORTUNITY_COLOR[s.opportunity]} strokeWidth={1} style={{ opacity: 0 }} />
+          ))}
+        </svg>
         {props.stops.map((s, i) => {
           const active = i === props.focusIndex;
           return (
-            <div key={s.id} data-stop={s.id} className="absolute left-0 top-0 whitespace-nowrap opacity-0 will-change-transform">
+            <div key={s.id} data-stop={s.id} title={s.name} className="group absolute left-0 top-0 whitespace-nowrap opacity-0 will-change-transform">
               <div
                 className={`flex items-center gap-1.5 rounded-sm px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-[0.12em] ${
                   active ? "bg-ink text-night" : "bg-night/80 text-ink ring-1 ring-ink/15"
                 }`}
               >
                 <span style={{ color: active ? undefined : OPPORTUNITY_COLOR[s.opportunity] }}>{String(s.order).padStart(2, "0")}</span>
-                <span>{s.name}</span>
+                <span className="group-data-[compact=1]:hidden">{s.name}</span>
               </div>
             </div>
           );
