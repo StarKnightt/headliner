@@ -51,7 +51,8 @@ export function hydratePlan(
 
   const points = chosen.map((s) => ({ ...s, id: s.cityId, lat: CITY_BY_ID.get(s.cityId)!.lat, lng: CITY_BY_ID.get(s.cityId)!.lng }));
   const startId = request.startCityId && seen.has(request.startCityId) ? request.startCityId : points[0]?.id;
-  const routed = orderRoute(points, startId);
+  const closeId = draft.closeCityId?.trim().toLowerCase();
+  const routed = orderRoute(points, startId, closeId && closeId !== startId && seen.has(closeId) ? closeId : undefined);
 
   const stops: Stop[] = routed.map((s, i) => {
     const city = CITY_BY_ID.get(s.cityId)!;

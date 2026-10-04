@@ -111,12 +111,13 @@ export const PlanDraftSchema = z.object({
       z.object({
         cityId: z.string().describe("cityId exactly as returned by score_cities"),
         reason: z.string().min(1).max(320).describe("Why this city, citing the fan affinity / popularity numbers"),
-        venueIds: z.array(z.string()).max(3).describe("venue ids returned by find_venues for this city, best first"),
+        venueIds: z.array(z.string()).max(3).default([]).describe("venue ids returned by find_venues for this city, best first"),
         venueNotes: z.array(z.string().max(200)).max(3).optional().describe("one short note per venueId, same order"),
       }),
     )
     .min(1)
     .max(12),
+  closeCityId: z.string().max(10).optional().describe("Only if the user's constraints ask to finish somewhere: that stop's cityId"),
   coHeadliners: z
     .array(
       z.object({
@@ -125,11 +126,13 @@ export const PlanDraftSchema = z.object({
         why: z.string().max(240),
       }),
     )
-    .max(4),
+    .max(4)
+    .default([]),
   brandPartners: z
     .array(z.object({ id: z.string().describe("brand id from brand_affinities"), pitch: z.string().max(240) }))
-    .max(4),
-  audienceNotes: z.array(z.string().max(240)).max(4).describe("Briefing notes for poster/merch designers, aggregate only"),
+    .max(4)
+    .default([]),
+  audienceNotes: z.array(z.string().max(240)).max(4).default([]).describe("Briefing notes for poster/merch designers, aggregate only"),
   caveats: z.array(z.string().max(240)).max(4).optional(),
 });
 export type PlanDraft = z.infer<typeof PlanDraftSchema>;

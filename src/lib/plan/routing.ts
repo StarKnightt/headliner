@@ -7,11 +7,16 @@ interface Point {
   lng: number;
 }
 
-/** Nearest-neighbour tour from `startId` (or the first point), improved with 2-opt. Open path. */
-export function orderRoute<T extends Point>(points: T[], startId?: string): T[] {
-  if (points.length <= 2) return [...points];
+/** Nearest-neighbour tour from `startId` (or the first point), improved with 2-opt. Open path; `endId` pins the closing stop. */
+export function orderRoute<T extends Point>(points: T[], startId?: string, endId?: string): T[] {
   const startIdx = Math.max(0, points.findIndex((p) => p.id === startId));
-  const remaining = points.filter((_, i) => i !== startIdx);
+  const endIdx = endId ? points.findIndex((p) => p.id === endId) : -1;
+  const end = endIdx >= 0 && endIdx !== startIdx ? points[endIdx] : null;
+  if (points.length <= 2) {
+    if (points.length === 2 && end) return [points[startIdx], end];
+    return [...points];
+  }
+  const remaining = points.filter((_, i) => i !== startIdx && points[i] !== end);
   const route: T[] = [points[startIdx]];
   while (remaining.length) {
     const last = route[route.length - 1];
@@ -21,11 +26,13 @@ export function orderRoute<T extends Point>(points: T[], startId?: string): T[] 
     }
     route.push(remaining.splice(best, 1)[0]);
   }
+  if (end) route.push(end);
+  const lastMovable = end ? route.length - 2 : route.length - 1;
   let improved = true;
   while (improved) {
     improved = false;
-    for (let i = 1; i < route.length - 1; i++) {
-      for (let k = i + 1; k < route.length; k++) {
+    for (let i = 1; i < lastMovable; i++) {
+      for (let k = i + 1; k <= lastMovable; k++) {
         const a = route[i - 1];
         const b = route[i];
         const c = route[k];

@@ -162,7 +162,8 @@ const findVenues = defineTool({
             collectCalls(ctx, wide.calls);
             list = wide.data;
           }
-          ctx.ledger.venues.set(city.id, list);
+          const prior = (ctx.ledger.venues.get(city.id) ?? []).filter((v) => !list.some((x) => x.id === v.id));
+          ctx.ledger.venues.set(city.id, [...list, ...prior]);
           found += list.length;
           out.push({
             cityId: city.id,
