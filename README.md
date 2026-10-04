@@ -1,36 +1,124 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Headliner
 
-## Getting Started
+**Tour where your fans already are.** Headliner is an agent that routes a concert tour from
+[Qloo](https://www.qloo.com/) taste data. Give it an artist and a territory. It finds the cities
+where that artist's audience over-indexes, the rooms that audience already goes to, the acts and
+brands they share taste with, and an aggregate audience brief. It then routes the run, draws it on
+a night-lights globe, and exports a booking sheet.
 
-First, run the development server:
+Built for the [Qloo Agentic Hackathon](https://qloo.devpost.com/).
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+![Headliner overview](shots/01-desktop-overview.png)
+
+> The screenshots in `shots/` were taken in **mock mode** (no Qloo key yet). Every number in them
+> is fixture data, and the app says so with a hazard banner, a "Mock data · not Qloo" badge, a
+> `[mock]` tag on every call, and a MOCK caveat at the top of every export.
+
+## Why Qloo
+
+Booking agents route tours on gut feel and last tour's ticket counts. That data doesn't exist for
+a first run in a new territory. Qloo's taste graph can show where an audience over-indexes
+relative to local popularity before a single ticket is sold. Headliner treats that gap as the
+signal. If a city has high fan affinity but low local popularity, the fans are there and the
+market isn't crowded yet: a **hidden gem**.
+
+| Read | Rule (Headliner's interpretation of Qloo numbers) |
+| --- | --- |
+| Hidden gem | affinity ≥ 68%, popularity < 55% |
+| Stronghold | affinity ≥ 68% |
+| Emerging | affinity ≥ 50% |
+| Long shot | everything else |
+
+## How a run works
+
+1. **Resolve the artist:** `GET /search?query=…&types=urn:entity:artist`
+2. **Find venue tags:** `GET /v2/tags?filter.query=music venue&feature.semantic_search=true`
+3. **Score cities:** `GET /v2/insights?filter.type=urn:heatmap&signal.interests.entities=<artist>&filter.location.query=<country/region>&output.heatmap.boundary=urn:entity:locality`
+   returns many cities in one call. Each result is matched to the city catalogue within 75 km. Any
+   city that isn't matched falls back to its own geohash heatmap.
+4. **Neighbourhood hotspots:** a geohash `urn:heatmap` per chosen city. These are drawn as glowing
+   cells on the globe.
+5. **Venues:** `filter.type=urn:entity:place` with `filter.location.query=<city>`, `filter.tags=<venue tags>`,
+   a popularity band sized to the artist and room size, and `feature.explainability=true`.
+6. **Bill:** similar artists (`urn:entity:artist`, excluding the headliner) at peer and smaller
+   popularity bands, used as co-headliners and support.
+7. **Partners and audience:** `urn:entity:brand`, `urn:demographics` and `urn:tag` insights.
+8. **Plan:** an LLM (Groq or OpenAI, tool-calling) reads the evidence and writes a *draft*. The
+   draft may only reference IDs that Qloo returned. The server hydrates every number, coordinate
+   and leg from the evidence ledger, drops anything invented (and shows what it dropped in the
+   timeline), routes the stops with nearest-neighbour plus 2-opt, and validates the result with zod.
+   Without an LLM key, a deterministic planner runs the same tools in a fixed order.
+
+Each step streams to the **Soundcheck** timeline. The **Qloo calls** tab lists every request with
+its parameters, duration and result count. The key is never shown.
+
+Example run, Khruangbin across North America, 7 stops (mock data; the structure is real):
+
+```text
+GET /v2/insights?filter.type=urn:heatmap&signal.interests.entities=<id>
+    &filter.location.query=United States&output.heatmap.boundary=urn:entity:locality&take=50
+→ 50 localities · New York 88% / Los Angeles 83% / Denver 57% …
+GET /v2/insights?filter.type=urn:entity:place&signal.interests.entities=<id>
+    &filter.location.query=Austin&filter.tags=<venue tag>&filter.popularity.min=0.75&take=5
+→ Stubb's Waller Creek, Mohawk …
+⇒ 7 stops · 6,015 km · 23 Qloo calls · Itinerary + Markdown/JSON/printable booking sheet
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+More screenshots: [timeline](shots/02-agent-timeline.png) · [stop focus](shots/03-stop-focus-hotspots.png) ·
+[Qloo calls](shots/04-qloo-calls.png) · [India](shots/05-india-run.png) · [Europe](shots/06-europe-run.png) ·
+[booking sheet](shots/07-print-booking-sheet.png) · [/how](shots/08-how-qloo-powers-this.png) · [mobile](shots/09-mobile.png)
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Run it
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Requires Node 22+ and pnpm 10.
 
-## Learn More
+```bash
+pnpm install
+cp .env.example .env.local   # add QLOO_API_KEY and optionally GROQ_API_KEY / OPENAI_API_KEY
+pnpm dev                     # http://localhost:3000
+```
 
-To learn more about Next.js, take a look at the following resources:
+| Script | What it does |
+| --- | --- |
+| `pnpm test` | vitest: plan schema, hydration/anti-hallucination, routing, Qloo mapping, HTTP client, mock transport |
+| `pnpm typecheck` / `pnpm lint` / `pnpm build` | the usual |
+| `pnpm verify:qloo [artist]` | hits every Qloo endpoint Headliner uses with the real key and prints response shapes |
+| `pnpm shots [url]` | regenerates `shots/` from a running instance (uses the local Chrome) |
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+### Environment
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+All variables are server-side only; none are `NEXT_PUBLIC_`. See [`.env.example`](.env.example).
 
-## Deploy on Vercel
+- `QLOO_API_KEY`: if empty, the app runs on **mock fixtures** and labels them everywhere.
+- `GROQ_API_KEY` or `OPENAI_API_KEY` (or `LLM_PROVIDER` / `LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL`
+  for any OpenAI-compatible endpoint): if none is set, the deterministic planner runs.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Project layout
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```text
+src/lib/qloo/        typed client: transport interface, HTTP transport (cache + retries), mock transport, mapping
+src/lib/agent/       tools, evidence ledger, LLM orchestrator, deterministic planner, stream events
+src/lib/plan/        zod schemas, hydration, routing/scoring, Markdown export
+src/components/      globe (R3F + custom shaders), control deck, timeline, itinerary, print sheet
+src/app/api/plan     POST → NDJSON stream of agent events
+```
+
+## Limits and honesty
+
+- Scores are Qloo **aggregate** taste affinities for audiences in a place. They are not
+  ticket-sales forecasts and never describe an individual. No personal data is sent to Qloo.
+- The opportunity labels and the stop score are Headliner's interpretation, not Qloo outputs.
+- Venue suggestions are places Qloo associates with the audience. Capacity, availability and
+  routing days still need a human agent.
+- The city catalogue is curated (56 cities). Qloo localities are matched to it by distance.
+
+## Credits
+
+- Taste data: [Qloo](https://www.qloo.com/) Insights API (hackathon tier).
+- Earth at night: NASA Earth Observatory, **Black Marble 2016** (public domain). See
+  [`public/textures/ATTRIBUTION.md`](public/textures/ATTRIBUTION.md).
+- Fonts: Big Shoulders, Instrument Sans and JetBrains Mono (SIL OFL, via Google Fonts).
+
+## License
+
+[MIT](LICENSE) © 2026 Prasenjit Nayak
