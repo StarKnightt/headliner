@@ -13,6 +13,12 @@ describe("getLlm", () => {
     expect(c.provider).toBe("groq");
     expect(c.model).toBe("openai/gpt-oss-120b");
     expect(c.client.baseURL).toBe("https://api.groq.com/openai/v1");
+    expect(c.models).toEqual(["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]);
+  });
+
+  it("puts LLM_MODEL first and honours LLM_FALLBACK_MODELS (empty disables fallbacks)", () => {
+    expect(getLlm(env({ GROQ_API_KEY: "g", LLM_MODEL: "openai/gpt-oss-20b" }))!.models).toEqual(["openai/gpt-oss-20b", "openai/gpt-oss-120b", "qwen/qwen3.8-27b"]);
+    expect(getLlm(env({ GROQ_API_KEY: "g", LLM_FALLBACK_MODELS: "" }))!.models).toEqual(["openai/gpt-oss-120b"]);
   });
 
   it("honours LLM_PROVIDER and LLM_MODEL overrides", () => {
