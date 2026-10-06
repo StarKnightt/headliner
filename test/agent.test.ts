@@ -1,14 +1,31 @@
 import { describe, expect, it } from "vitest";
 import { EvidenceLedger } from "@/lib/agent/ledger";
 import { AliasBook, claimProblems } from "@/lib/agent/orchestrator";
+import { billBand } from "@/lib/agent/tools";
+import type { CityAffinity } from "@/lib/qloo/domain";
 import { orderRoute } from "@/lib/plan/routing";
+
+const score = (cityId: string, affinity: number, popularity: number, extra: Partial<CityAffinity> = {}): CityAffinity => ({
+  cityId,
+  affinity,
+  popularity,
+  peakAffinity: affinity,
+  peakKm: 0,
+  cell: null,
+  area: "North America",
+  resolvedLocality: null,
+  method: "heatmap-geohash",
+  ...extra,
+});
 
 function ledger() {
   const l = new EvidenceLedger();
-  l.cityScores.set("atx", { cityId: "atx", affinity: 0.91, popularity: 0.4, resolvedLocality: "Austin", method: "heatmap-locality" });
-  l.cityScores.set("nyc", { cityId: "nyc", affinity: 0.8, popularity: 0.58, resolvedLocality: "New York", method: "heatmap-locality" });
-  l.venues.set("atx", [
-    { id: "V-UUID-1", name: "Mohawk", type: "urn:entity:place", popularity: 0.71, affinity: 0.88, description: null, imageUrl: null, tags: [], explainedBy: [], address: null, city: null, lat: null, lng: null, businessRating: null },
+  // Live Khruangbin numbers from the North America heatmap (Oct 6, 2026).
+  l.cityScores.set("btv", score("btv", 0.992, 0.976));
+  l.cityScores.set("nyc", score("nyc", 0.986, 1.0));
+  l.cityScores.set("atl", score("atl", 0.892, 0.986, { peakAffinity: 0.928, peakKm: 18 }));
+  l.venues.set("btv", [
+    { id: "V-UUID-1", name: "Higher Ground", type: "urn:entity:place", popularity: 0.951, affinity: 0.842, description: null, imageUrl: null, tags: [], explainedBy: [], address: null, city: null, neighborhood: null, category: "Live music venue", primaryCategory: "Live music venue", website: null, lat: null, lng: null, businessRating: null },
   ]);
   return l;
 }
@@ -22,14 +39,14 @@ describe("AliasBook", () => {
     const d = a.resolveDraft({
       headline: "h",
       summary: "s",
-      stops: [{ cityId: " ATX ", reason: "r", venueIds: ["v1", "v9"] }],
-      closeCityId: "ATX",
+      stops: [{ cityId: " BTV ", reason: "r", venueIds: ["v1", "v9"] }],
+      closeCityId: "BTV",
       coHeadliners: [{ id: "a1", role: "support", why: "w" }],
       brandPartners: [],
       audienceNotes: [],
     });
-    expect(d.stops[0]).toMatchObject({ cityId: "atx", venueIds: ["V-UUID-1", "v9"] });
-    expect(d.closeCityId).toBe("atx");
+    expect(d.stops[0]).toMatchObject({ cityId: "btv", venueIds: ["V-UUID-1", "v9"] });
+    expect(d.closeCityId).toBe("btv");
     expect(d.coHeadliners[0].id).toBe("A-UUID");
   });
 });
@@ -40,17 +57,33 @@ describe("claimProblems", () => {
   const ctx = { ledger: ledger() };
   const stop = (cityId: string, reason: string, venueIds: string[] = []) => ({ cityId, reason, venueIds });
 
-  it("accepts reasons that cite the stop's own numbers, headroom and chosen venue", () => {
-    expect(claimProblems(stop("atx", "Fan affinity 0.91 vs 0.40 local popularity (+0.51), a hidden gem; Mohawk 88%.", ["v1"]), ctx, a)).toEqual([]);
+  it("accepts reasons that cite the stop's own share, affinity, popularity, headroom and chosen venue", () => {
+    expect(
+      claimProblems(stop("btv", "A hidden gem: fans rank in the top 0.8% of North America (affinity 0.992) against 0.976 local popularity, headroom +0.14. Higher Ground 0.842.", ["v1"]), ctx, a),
+    ).toEqual([]);
+    expect(claimProblems(stop("btv", "Fans at the 99.2nd percentile, well ahead of the market (97.6%)."), ctx, a)).toEqual([]);
+  });
+
+  it("accepts a metro-peak citation and ignores distances", () => {
+    expect(claimProblems(stop("atl", "Fans peak 18 km from the centre (top 7%, 0.928), not downtown (0.892)."), ctx, a)).toEqual([]);
   });
 
   it("flags numbers that belong to another city", () => {
-    expect(claimProblems(stop("atx", "Fan affinity 0.80 vs 0.58."), ctx, a)[0]).toMatch(/cites 0.8, 0.58/);
+    expect(claimProblems(stop("btv", "Fans in the top 1.4% (affinity 0.986) against 1.000 popularity."), ctx, a)[0]).toMatch(/cites 1.4%, 0.986/);
   });
 
   it("flags a read label that contradicts the evidence", () => {
-    expect(claimProblems(stop("nyc", "A hidden-gem market at 0.80 affinity."), ctx, a)[0]).toMatch(/calls it hidden-gem but its read is stronghold/);
-    expect(claimProblems(stop("nyc", "Not a hidden gem; a stronghold at 80%."), ctx, a)).toEqual([]);
+    expect(claimProblems(stop("nyc", "A hidden-gem market at 0.986 affinity."), ctx, a)[0]).toMatch(/calls it hidden-gem but its read is emerging/);
+    expect(claimProblems(stop("nyc", "Not a hidden gem; fans at 0.986 in a saturated market."), ctx, a)).toEqual([]);
+  });
+});
+
+describe("billBand", () => {
+  it("is multiplicative on the distance from the top of the popularity scale", () => {
+    expect(billBand("peer", 0.992)).toEqual([0.976, 0.9973]);
+    expect(billBand("smaller", 0.992)).toEqual([undefined, 0.976]);
+    expect(billBand("bigger", 0.992)).toEqual([0.9973, undefined]);
+    expect(billBand("peer", 0.86)[0]).toBeCloseTo(0.58, 2);
   });
 });
 
