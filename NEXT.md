@@ -46,6 +46,8 @@ deterministic planner, as designed. Re-run the eval when the key has budget.
 
 ## Before submitting
 
+- [ ] Join the hackathon on Devpost (accept the official rules), then "Enter a submission" and paste
+      `../DEVPOST.md`; upload `shots/` as the gallery. Devpost asks for a reCAPTCHA when the project is created.
 - [ ] Re-warm the demos with the LLM once Groq has budget: `pnpm warm https://headliner-five.vercel.app --fresh`.
 - [ ] Optional: a dedicated Groq key (or Groq's Dev tier) for Headliner, so other projects cannot exhaust its daily tokens.
 - [ ] Re-warm again just before judging (Nov 2): recorded runs and cached Qloo responses last 7 days.
