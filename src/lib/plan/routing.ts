@@ -49,28 +49,71 @@ export function orderRoute<T extends Point>(points: T[], startId?: string, endId
   return route;
 }
 
+/** With no requested opener, try every stop as the start and keep the shortest run. */
+export function shortestRoute<T extends Point>(points: T[], endId?: string): T[] {
+  let best: T[] = orderRoute(points, points[0]?.id, endId);
+  for (const p of points) {
+    if (p.id === endId) continue;
+    const r = orderRoute(points, p.id, endId);
+    if (routeDistanceKm(r) < routeDistanceKm(best)) best = r;
+  }
+  return best;
+}
+
 export function routeDistanceKm(points: Point[]): number {
   let total = 0;
   for (let i = 1; i < points.length; i++) total += haversineKm(points[i - 1], points[i]);
   return Math.round(total);
 }
 
+const clamp01 = (x: number) => Math.max(0, Math.min(1, x));
+
 /**
- * Headliner's own interpretation of two Qloo numbers (not a Qloo metric):
- * strong affinity + modest local popularity = fans are there but the market is not saturated.
+ * Qloo heatmap affinity and popularity are percentiles across every cell in a territory, so big
+ * cities crowd the top (0.95 to 1.0). Headliner reads them on a log scale of "how far into the top":
+ * top 0.1% → 0.98, top 1% → 0.85, top 3% → 0.70, top 7% → 0.55, median → 0.15.
+ */
+export function pctIndex(percentile: number): number {
+  return 1 - Math.log10(1 + 99 * (1 - clamp01(percentile))) / 2;
+}
+
+/** How far the fan rank runs ahead of the local popularity rank (positive = fans outpace the market). */
+export function headroom(affinity: number, popularity: number | null): number {
+  return popularity === null ? 0 : Math.round((pctIndex(affinity) - pctIndex(popularity)) * 100) / 100;
+}
+
+/** "top 0.8%" for a percentile of 0.992. */
+export function topShare(percentile: number): string {
+  const t = (1 - clamp01(percentile)) * 100;
+  if (t < 0.1) return "top 0.1%";
+  if (t < 1) return `top ${t.toFixed(1)}%`;
+  return `top ${Math.round(t)}%`;
+}
+
+/**
+ * Headliner's interpretation of two Qloo numbers (not a Qloo metric), calibrated on live heatmaps for
+ * 12 artists across all six territories:
+ * - hidden gem: fans in the top 3% of the territory and clearly ahead of local popularity (headroom ≥ 0.05)
+ * - stronghold: fans in the top 1%
+ * - emerging: fans in the top 7%
  */
 export function classifyOpportunity(affinity: number, popularity: number | null): Opportunity {
-  const pop = popularity ?? 0.5;
-  if (affinity >= 0.68 && pop < 0.55) return "hidden-gem";
-  if (affinity >= 0.68) return "stronghold";
-  if (affinity >= 0.5) return "emerging";
+  const ia = pctIndex(affinity);
+  if (ia >= 0.7 && headroom(affinity, popularity) >= 0.05) return "hidden-gem";
+  if (ia >= 0.85) return "stronghold";
+  if (ia >= 0.55) return "emerging";
   return "long-shot";
 }
 
-/** 0..100 routing score: 70% fan affinity, 30% headroom (affinity above local popularity). */
+/** 0..100 routing score: 80% fan concentration (log-scale affinity), 20% headroom over local popularity. */
 export function stopScore(affinity: number, popularity: number | null): number {
-  const headroom = Math.max(0, Math.min(1, affinity - (popularity ?? 0.5) + 0.5));
-  return Math.round(100 * (0.7 * affinity + 0.3 * headroom));
+  return Math.round(100 * clamp01(0.8 * pctIndex(affinity) + 0.2 * clamp01(0.5 + 2 * headroom(affinity, popularity))));
+}
+
+/** True when the metro's best cell clearly beats the centre cell, e.g. a suburban audience. */
+export function metroPeakNote(affinity: number, peak: number | null, km: number | null): string | null {
+  if (peak === null || km === null || km < 8 || pctIndex(peak) - pctIndex(affinity) < 0.05) return null;
+  return `fans peak ${km} km from the centre (${topShare(peak)})`;
 }
 
 export const OPPORTUNITY_LABEL: Record<Opportunity, string> = {

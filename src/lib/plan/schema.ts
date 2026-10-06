@@ -20,6 +20,11 @@ export const VenueSchema = z.object({
   id: z.string(),
   name: z.string(),
   address: z.string().nullable(),
+  neighborhood: z.string().nullable().default(null),
+  category: z.string().nullable().default(null),
+  /** The place's own first category when it differs from the room match, e.g. "Afghan restaurant". */
+  kind: z.string().nullable().default(null),
+  website: z.string().nullable().default(null),
   lat: z.number().nullable(),
   lng: z.number().nullable(),
   affinity: unit.nullable(),
@@ -36,8 +41,14 @@ export const StopSchema = z.object({
   country: z.string().length(2),
   lat: z.number().min(-90).max(90),
   lng: z.number().min(-180).max(180),
+  /** Qloo heatmap affinity of the city-centre cell: percentile within `area`. */
   fanAffinity: unit,
+  /** Qloo heatmap popularity of that cell: percentile within `area`. */
   marketPopularity: unit.nullable(),
+  /** Territory the percentiles are relative to. */
+  area: z.string(),
+  /** Best cell within 35 km when it clearly beats the centre. */
+  peak: z.object({ affinity: unit, km: z.number().min(0) }).nullable(),
   opportunity: OpportunitySchema,
   score: z.number().min(0).max(100),
   reason: z.string().min(1),
@@ -48,8 +59,11 @@ export const StopSchema = z.object({
 });
 export type Stop = z.infer<typeof StopSchema>;
 
+/** Territory heatmap cells for the globe: [lat, lng, affinity]. */
+export const HeatPointSchema = z.tuple([z.number(), z.number(), unit]);
+
 export const TourPlanSchema = z.object({
-  version: z.literal(1),
+  version: z.literal(2),
   generatedAt: z.string(),
   mode: z.object({
     qloo: z.enum(["live", "mock"]),
@@ -91,10 +105,17 @@ export const TourPlanSchema = z.object({
   audience: z.object({
     age: z.array(z.object({ band: z.string(), affinity: z.number().min(-1).max(1) })),
     gender: z.object({ male: z.number().min(-1).max(1).nullable(), female: z.number().min(-1).max(1).nullable() }),
-    tasteTags: z.array(z.object({ name: z.string(), affinity: unit.nullable() })).max(16),
+    tasteTags: z.array(z.object({ name: z.string(), group: z.string().nullable().default(null), affinity: unit.nullable() })).max(30),
     notes: z.array(z.string()).max(6),
   }),
-  totals: z.object({ stops: z.number().int(), distanceKm: z.number().min(0), qlooCalls: z.number().int().min(0) }),
+  heat: z.array(HeatPointSchema).max(900).default([]),
+  totals: z.object({
+    stops: z.number().int(),
+    distanceKm: z.number().min(0),
+    qlooCalls: z.number().int().min(0),
+    cachedCalls: z.number().int().min(0).default(0),
+    candidates: z.number().int().min(0).default(0),
+  }),
   caveats: z.array(z.string()),
 });
 export type TourPlan = z.infer<typeof TourPlanSchema>;
