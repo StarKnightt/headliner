@@ -42,4 +42,7 @@ next-env.d.ts
 
 !.env.example
 eval/
-eval/
+.cache/
+
+.vercel
+.env*

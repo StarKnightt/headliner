@@ -1,157 +1,52 @@
-# NEXT: when the Qloo key arrives
+# Verification log and next steps
 
-Everything below was built against documented response shapes and a mock transport. Nothing has
-been checked against the live API yet. Work through this list top to bottom; each item names the
-code to change if reality differs.
+Headliner was first built against documented response shapes and a mock transport (Oct 4). On Oct 6
+it was moved to the live hackathon API, every call was checked against real responses, and the
+mapping and scoring were rebuilt where reality differed. This file records what was found.
 
-Deadline: **Oct 31, 2026, 9:15 AM IST**. Needs a hosted demo, a public repo with an OSS license (MIT
-is in place), and real Qloo usage.
+Deadline: **Oct 31, 2026, 9:15 AM IST.** Live demo: https://headliner-five.vercel.app
 
-## 0. Put the key in place (never in git, chat, screenshots or the browser)
+## Endpoint by endpoint (live, Oct 6)
 
-```bash
-cp .env.example .env.local      # .env.local is gitignored; .env.example is the only env file committed
-# edit .env.local → QLOO_API_KEY=...
-pnpm verify:qloo Khruangbin     # live smoke test of every call, prints shapes only
-pnpm verify:qloo "Prateek Kuhad"
-```
+`pnpm verify:qloo` exercises every call below (about 12 calls) and exits non-zero if one misbehaves.
 
-`verify:qloo` exits non-zero if any call fails. Paste its output into an issue or note. It never
-prints the key, but check before sharing anyway.
+| Call | Finding | Change |
+| --- | --- | --- |
+| `GET /search?types=urn:entity:artist` | `{ results: [...] }`, `types` honoured, exact names resolve (Prateek Kuhad, AP Dhillon, PEGGY GOU in caps) | exact case-insensitive match first |
+| `GET /v2/tags` | `live_music_venue`, `concert_hall`, `night_club`, `jazz_club`, `performing_arts_theater`, `arena`, `amphitheater`, `stadium` exist as `urn:tag:category:place:*`. The guessed `music_venue` does not. `filter.parents.types=urn:entity:place` returns decor and setting tags, not categories | room sizes map to verified category IDs; semantic search without the parents filter |
+| `urn:heatmap` + `output.heatmap.boundary=urn:entity:locality` | **500 "System Error"** for every area tried (US, Europe, India, a WKT box, a tag signal, a single city). Only `urn:geohash` and `urn:entity:locality` are accepted values | cities are read from geohash cells instead |
+| `urn:heatmap` with `filter.location.query` | "United States", "Canada", "India" work. "Europe" and "Southeast Asia" return zero cells | multi-country territories use WKT polygons (`filter.location`) |
+| `urn:heatmap` shape | `location.{latitude,longitude,geohash}`, `query.{affinity,affinity_rank,popularity}`. Country-size areas return precision-4 cells (about 40 km), 1,000 to 10,000 of them; `take` is ignored. Affinity and popularity are uniform percentiles across the queried cells | one call per territory; each city read at its centre cell; packed for caching |
+| `urn:entity:place` | works with the real tags; affinity clusters at 0.80 to 0.87 inside a city; popularity tracks prominence, not capacity. Locality proof is `query.localities.filter[0].disambiguation` (not `query.locality.signal`) | rooms ranked real-room-first; locality shown per stop; popularity bands dropped except a 0.97 cap for clubs |
+| `urn:entity:place` with unresolvable names | `400 filter.location.query is unable to resolve to a valid locality` (Shillong) | retry with `filter.location=POINT(lng lat)` and a 20 km radius |
+| `urn:entity:artist` | exclude works; every known touring act is above popularity 0.9; `signal.demographics.age=24_and_younger` changes the list | multiplicative popularity bands for peers and support acts |
+| `urn:entity:brand` | duplicates by name (two Fjällräven IDs); category lives in `urn:tag:genre:brand` tags | dedupe by name; category from tags |
+| `urn:demographics` | `results.demographics[0].query.age` and `.gender`, values −1 to 1, as documented | demographic facts are written by the server, never by the LLM |
+| `urn:tag` | results under `results.tags` with `tag_id` and `subtype`; mixes every domain. `filter.tag.types` and `diversify.by=subtype` work | one call across six subtypes, grouped in the audience brief; names trimmed |
+| `/v2/audiences` | needs `filter.parents.types` (or another filter); not used | removed from the verify script |
+| explainability | 1.0 with one signal; about 33/33/33 across three artists | treated as provenance, not insight |
+| limits | `x-second-ratelimit-limit: 5`, `x-month-ratelimit-limit: 10000` | 230 ms spacing, in-flight sharing, 7-day cache, quota floor, run replay |
 
-## 1. Endpoint-by-endpoint checks
+## Calibration
 
-Code under test: `src/lib/qloo/service.ts` (parameters), `src/lib/qloo/mapping.ts` (parsing),
-`src/lib/qloo/types.ts` (raw types). When a shape differs, fix the mapping, add the real (redacted)
-payload as a fixture in `test/qloo-client.test.ts`, and run `pnpm test`.
+Real percentiles put every big city near the top, so the mock-tuned thresholds (affinity ≥ 0.68,
+popularity < 0.55) labelled everything a stronghold. The read now uses a log scale of how far into the
+top a city sits; thresholds were set on heatmaps for 12 artists across all six territories
+(`eval/calibrate.eval.ts`, gitignored). See the README for the rules.
 
-### 1.1 `GET /search?query=<artist>&types=urn:entity:artist&take=5`
-- [ ] Body is `{ results: [...] }` (not `{ results: { entities } }`). `mapSearch` expects an array.
-- [ ] Each result has `entity_id`, `name`, `popularity` and `types` (or `subtype`). Image lives at `properties.image.url`.
-- [ ] `types` is honoured (only artists come back). If not, filter by type in `searchArtist`.
-- [ ] Ambiguous names ("Phoenix", "Low"): is the first result the most popular? The agent
-      currently takes `[0]`.
+## LLM planner on live data
 
-### 1.2 `GET /v2/tags?filter.query=music venue&feature.semantic_search=true&take=8`
-- [ ] Returns `results.tags[]` with `id` (or `tag_id`), `name`, `type`.
-- [ ] Find the **real venue tag IDs**. `DEFAULT_VENUE_TAG = "urn:tag:category:place:music_venue"`
-      in `service.ts` is a guess. Replace it with the real ones (live music venue, concert hall,
-      nightclub, theater…).
-- [ ] Does `filter.parents.types=urn:entity:place` narrow to place tags? If not, drop it.
+`pnpm eval:llm` (10 cases, including Prateek Kuhad and Anoushka Shankar in India, AP Dhillon in North
+America, Fred again.. in Europe and a prompt-injection case) went 6/10 on the first live round: runs
+overflowed Groq's 8K tokens per minute and ran out of turns. After shrinking the digest, fetching rooms
+for hidden gems up front, forcing a submission on the last two turns and narrowing one validator, the
+four failed cases passed (4/4), as did Khruangbin on the final code. The rest of the final round hit
+Groq's free-tier daily cap (200K tokens per model) on the shared key; those runs finished on the
+deterministic planner, as designed. Re-run the eval when the key has budget.
 
-### 1.3 Locality heatmap: the core city-scoring call
-`/v2/insights?filter.type=urn:heatmap&signal.interests.entities=<id>&filter.location.query=<within>&output.heatmap.boundary=urn:entity:locality&take=50`
-- [ ] `output.heatmap.boundary=urn:entity:locality` is accepted and returns city-level points.
-      **Biggest unknown.** If it is ignored (invalid params are silently dropped), you get geohash
-      cells instead. Check that points carry a `name` and that coordinates look like city centres.
-- [ ] Country and region queries resolve: "United States", "Canada", "Europe", "Southeast Asia",
-      "United Kingdom", "India" (`REGION_LOCALITY_QUERIES`). If "Europe" or "Southeast Asia"
-      don't resolve, split them into countries.
-- [ ] Point shape is `{ location: { latitude, longitude, geohash }, query: { affinity, affinity_rank, popularity } }`.
-- [ ] `take` above 50 is capped. If coverage is thin, increase calls per region instead.
-- [ ] Fallback: if locality heatmaps don't work at all, `scoreCities` already falls back to one
-      geohash heatmap per city (mean of the top 5 cells). That costs about 16–20 calls per run,
-      so watch rate limits.
-- [ ] **Alternative to try:** `filter.type=urn:entity:artist` + `filter.results.entities=<id>` +
-      `signal.location.query=<city>` per city, reading `query.affinity`. The Entity Type Parameter
-      Guide does **not** list `signal.location` for artists, so expect it to be ignored. Confirm
-      by comparing two cities. If the affinity changes, it is a cleaner per-city score.
+## Before submitting
 
-### 1.4 Geohash heatmap in a city
-`filter.type=urn:heatmap&filter.location.query=Austin&take=20`
-- [ ] Cells fall inside the city (not centred on a same-named place elsewhere, e.g. Portland or
-      Cambridge). If they don't, use `CITIES[].query` disambiguation ("Portland, Oregon").
-- [ ] `query.locality` in the response shows which locality matched. It becomes `qlooLocality` on each stop.
-
-### 1.5 Venues
-`filter.type=urn:entity:place&filter.location.query=<city>&filter.tags=<venue tags>&filter.popularity.min/max&feature.explainability=true&take=5`
-- [ ] Results are actually music venues once the real tag IDs are in.
-- [ ] `location.lat` / `location.lon` and `properties.address` exist (`mapPlace`).
-- [ ] The popularity band (`venuePopularityRange` in `agent/tools.ts`) isn't too narrow. The tool
-      widens once if the result is empty. Check how often that happens.
-- [ ] Explainability path: `query.explainability["signal.interests.entities"]`.
-
-### 1.6 Similar artists (bill)
-`filter.type=urn:entity:artist&filter.exclude.entities=<id>&filter.popularity.min/max&feature.explainability=true`
-- [ ] Exclude works (the headliner isn't in its own list).
-- [ ] `signal.demographics.age` (used for the "younger" option) is accepted, and which value
-      format works (`24_and_younger`?).
-
-### 1.7 Brands, demographics, taste tags
-- [ ] `urn:entity:brand` returns brands with a usable category. `properties.short_description`
-      becomes the category; if it's empty, use tags.
-- [ ] `urn:demographics` shape is `results.demographics[0].query.age{band:val}` and `.gender{male,female}`,
-      with values in −1..1 (the schema clamps them).
-- [ ] `urn:tag` insights: are results under `results.tags` or `results.entities`? `tasteTags()`
-      reads `results.tags` only. The verify script prints both.
-
-### 1.8 `/v2/audiences`
-- [ ] Response shape. It is typed but not used in the plan yet. Possible use: audience presets
-      for the brand brief.
-
-### 1.9 Limits
-- [ ] Note the rate limit (the verify script prints `x-ratelimit-remaining` if present). A run makes
-      about 20–30 calls. The HTTP transport caches every URL for 24h in memory and retries
-      429/5xx three times with backoff.
-- [ ] Latency per call. If runs take more than about 40s, lower the parallelism in `deterministic.ts`
-      or tighten `mapLimit` in `scoreCities`.
-
-## 2. With the real key, in the app
-
-- [ ] `pnpm dev`: the badge shows **Qloo live** and the hazard banner disappears. `/api/status`
-      returns `{"qloo":"live",...}`.
-- [ ] Run Khruangbin NA, Prateek Kuhad India, Fred again.. Europe, and Peggy Gou APAC. Check that
-      each map looks plausible and that the Qloo calls tab shows no `[mock]` tags.
-- [ ] Re-tune the opportunity thresholds in `src/lib/plan/routing.ts` to the live distribution
-      (mock data was tuned to produce some hidden gems; live data may not).
-- [x] LLM planner verified on Groq with mock Qloo data (Oct 4). `pnpm eval:llm` gave **10/10
-      valid plans in two consecutive rounds**. The baseline before the redesign was 0/10: Groq's
-      8K-tokens-per-minute cap and provider-side tool-argument validation broke every run.
-
-      | Model (Groq) | Runs ending on it | Valid | Avg turns | Avg tokens | Avg LLM time |
-      | --- | --- | --- | --- | --- | --- |
-      | `openai/gpt-oss-120b` (primary) | 10 | 10 | 1.2 | 3.9K | 9.0s |
-      | `openai/gpt-oss-20b` (fallback 1) | 8 | 8 | 1.5 | 5.0K | 13.6s |
-      | `qwen/qwen3.8-27b` (fallback 2) | 2 | 2 | 2.0 | 7.0K | 14.9s |
-
-      Across the 20 runs, total time per run had a median of about 11–14s and a maximum of 33s,
-      with 2 provider-rejected tool calls (both recovered). Llama 3.3 70B and Kimi K2 aren't served
-      on this Groq account. Qwen has a 1K output-tokens-per-minute cap, so it is last resort only.
-- [ ] Re-run `pnpm eval:llm` with the live Qloo key. The reasons' claims check (every cited number
-      must be the stop's own) will catch mapping problems quickly.
-- [ ] `pnpm shots` against the live build, then replace the mock screenshots in `shots/` and the README.
-      Check them for any key or personal data before committing.
-- [ ] Update the README example block with a real (redacted) request→result.
-
-## 3. Deploy to Vercel (not done yet; don't deploy until section 1 passes)
-
-The Vercel CLI isn't installed globally. Use `pnpm dlx vercel` or the dashboard.
-
-1. Create the GitHub repo (public) and push:
-   `gh repo create StarKnightt/headliner --public --source . --remote origin --push`
-2. Import into Vercel. Either use the dashboard ("Add New → Project", pick the repo; framework is
-   detected as Next.js, install command `pnpm install`), or from this folder:
-   ```bash
-   pnpm dlx vercel login
-   pnpm dlx vercel link
-   ```
-3. Add env vars as **Production + Preview**, server-side only, never `NEXT_PUBLIC_`:
-   ```bash
-   pnpm dlx vercel env add QLOO_API_KEY production
-   pnpm dlx vercel env add GROQ_API_KEY production
-   # repeat for preview; optional: LLM_MODEL, QLOO_BASE_URL
-   ```
-4. `/api/plan` sets `maxDuration = 120`. That's within the Hobby limit with Fluid compute
-   (default on). If runs are slow, check function logs.
-5. Deploy a preview with `pnpm dlx vercel` and smoke-test it: run a plan, open `/how`, print the
-   booking sheet, and try a phone. Then promote with `pnpm dlx vercel --prod`.
-6. Optional: since the key is server-side, the only abuse risk is people burning your Qloo quota.
-   If that matters, add a simple per-IP rate limit on `/api/plan` (for example Vercel Firewall rate limiting).
-7. Put the production URL in the Devpost entry and the README.
-
-## 4. Devpost entry checklist
-
-- [ ] Hosted demo URL (live Qloo, not mock).
-- [ ] Public repo, MIT license.
-- [ ] A description of exactly how Qloo is used. `/how` and the README "How a run works" section cover it.
-- [ ] Screenshots from live mode.
+- [ ] Re-warm the demos with the LLM once Groq has budget: `pnpm warm https://headliner-five.vercel.app --fresh`.
+- [ ] Optional: a dedicated Groq key (or Groq's Dev tier) for Headliner, so other projects cannot exhaust its daily tokens.
+- [ ] Re-warm again just before judging (Nov 2): recorded runs and cached Qloo responses last 7 days.
+- [ ] Check the demo URL logged out in an incognito window; confirm MIT shows in the GitHub About sidebar.

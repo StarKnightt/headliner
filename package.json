@@ -11,11 +11,14 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "verify:qloo": "node scripts/verify-qloo.mjs",
-    "eval:llm": "node scripts/eval-llm.mjs"
+    "eval:llm": "node scripts/eval-llm.mjs",
+    "warm": "node scripts/warm.mjs"
   },
   "dependencies": {
+    "@phosphor-icons/react": "^2.1.10",
     "@react-three/drei": "^10.7.9",
     "@react-three/fiber": "^9.8.1",
+    "@vercel/functions": "^3.9.11",
     "next": "16.3.8",
     "openai": "^7.27.0",
     "react": "19.2.8",

@@ -1,79 +1,94 @@
 # Headliner
 
-**Tour where your fans already are.** Headliner is an agent that routes a concert tour from
-[Qloo](https://www.qloo.com/) taste data. Give it an artist and a territory. It finds the cities
-where that artist's audience over-indexes, the rooms that audience already goes to, the acts and
-brands they share taste with, and an aggregate audience brief. It then routes the run, draws it on
-a night-lights globe, and exports a booking sheet.
+**Tour where your fans already are.** Headliner is a booking agent for independent artists, built on
+[Qloo](https://www.qloo.com/) taste data. Give it an artist and a territory. It reads Qloo's heatmap of
+where that artist's audience ranks highest, picks the cities (including the overlooked ones), the rooms
+that crowd already goes to, the acts and brands they share taste with, and an aggregate audience brief.
+Then it routes the run on a night-lights globe and exports a booking sheet.
 
-Built for the [Qloo Agentic Hackathon](https://qloo.devpost.com/).
+**Live demo: [headliner-five.vercel.app](https://headliner-five.vercel.app)** · built for the
+[Qloo Agentic Hackathon](https://qloo.devpost.com/) · [how Qloo powers it](https://headliner-five.vercel.app/how)
 
-![Headliner overview](shots/01-desktop-overview.png)
+![Headliner: Khruangbin across North America](shots/01-desktop-overview.png)
 
-> The screenshots in `shots/` were taken in **mock mode** (no Qloo key yet). Every number in them
-> is fixture data, and the app says so with a hazard banner, a "Mock data · not Qloo" badge, a
-> `[mock]` tag on every call, and a MOCK caveat at the top of every export.
+## What it finds
 
-## Why Qloo
+Booking agents route first tours on gut feel and last tour's ticket counts, and neither exists for a
+new territory. Qloo can show where an audience over-indexes before a single ticket is sold. A few
+results from live Qloo data:
 
-Booking agents route tours on gut feel and last tour's ticket counts. That data doesn't exist for
-a first run in a new territory. Qloo's taste graph can show where an audience over-indexes
-relative to local popularity before a single ticket is sold. Headliner treats that gap as the
-signal. If a city has high fan affinity but low local popularity, the fans are there and the
-market isn't crowded yet: a **hidden gem**.
-
-| Read | Rule (Headliner's interpretation of Qloo numbers) |
-| --- | --- |
-| Hidden gem | affinity ≥ 68%, popularity < 55% |
-| Stronghold | affinity ≥ 68% |
-| Emerging | affinity ≥ 50% |
-| Long shot | everything else |
+- **Khruangbin, North America.** San Francisco, Portland and Austin lead, as you would expect. The
+  surprise is Burlington, Vermont: fans rank in the top 0.8% of the continent while its market sits
+  lower (popularity 0.976), so it reads as a hidden gem. Missoula and Santa Fe do the same.
+- **AP Dhillon, North America.** The run comes out all-Canadian (Toronto, Winnipeg, Edmonton, Calgary,
+  Vancouver, Victoria), and the strongest cells sit 20 to 25 km outside Toronto and Vancouver, toward
+  Brampton and Surrey. His bill is Diljit Dosanjh, Karan Aujla and Sidhu Moose Wala.
+- **Prateek Kuhad, India.** Goa, Mumbai, Pune, Bengaluru, Kolkata and Shillong, with The Local Train,
+  Tajdar Junaid and The Yellow Diary on the bill and the Royal Opera House Mumbai as a theatre room.
+- **Sanity check.** Morgan Wallen's audience peaks in Nashville (0.994) and drops to 0.49 in San
+  Francisco. The signal is taste geography, not population.
 
 ## How a run works
 
-1. **Resolve the artist:** `GET /search?query=…&types=urn:entity:artist`
-2. **Find venue tags:** `GET /v2/tags?filter.query=music venue&feature.semantic_search=true`
-3. **Score cities:** `GET /v2/insights?filter.type=urn:heatmap&signal.interests.entities=<artist>&filter.location.query=<country/region>&output.heatmap.boundary=urn:entity:locality`
-   returns many cities in one call. Each result is matched to the city catalogue within 75 km. Any
-   city that isn't matched falls back to its own geohash heatmap.
-4. **Neighbourhood hotspots:** a geohash `urn:heatmap` per chosen city. These are drawn as glowing
-   cells on the globe.
-5. **Venues:** `filter.type=urn:entity:place` with `filter.location.query=<city>`, `filter.tags=<venue tags>`,
-   a popularity band sized to the artist and room size, and `feature.explainability=true`.
-6. **Bill:** similar artists (`urn:entity:artist`, excluding the headliner) at peer and smaller
-   popularity bands, used as co-headliners and support.
-7. **Partners and audience:** `urn:entity:brand`, `urn:demographics` and `urn:tag` insights.
-8. **Plan:** steps 1–7 run as a fixed research pass. The LLM (Groq `openai/gpt-oss-120b` by
-   default, tool calling) then gets a compact evidence digest, with Qloo IDs swapped for short
-   aliases (`v3`, `a2`, `b1`). It picks the cities, rooms, bill and brands, and can call follow-up
-   tools (`find_venues` with a room type, `similar_artists`) before it calls `submit_tour_plan`.
-   The server checks the draft: valid IDs, the exact stop count, and the start and close cities.
-   Every number cited in a stop reason must be that stop's own Qloo number, and any "hidden gem" or
-   "stronghold" label must match its computed read. A failing draft goes back to the model once
-   for correction. The server then hydrates every number, coordinate and leg from the evidence
-   ledger, drops anything invented (the timeline shows what was dropped), routes the stops with
-   nearest-neighbour plus 2-opt, and validates the result with zod. On a rate limit it moves to
-   the next model in the chain; any other failure finishes with the deterministic planner. Without
-   an LLM key, the deterministic planner runs on its own.
+Each step streams to the **Soundcheck** timeline; the **Qloo calls** tab lists every request with its
+parameters, timing, result count and whether it came from cache. The key never leaves the server.
 
-Each step streams to the **Soundcheck** timeline. The **Qloo calls** tab lists every request with
-its parameters, duration and result count. The key is never shown.
+| # | Tool | Qloo request |
+| --- | --- | --- |
+| 1 | Resolve the artist | `GET /search?query=…&types=urn:entity:artist` |
+| 2 | Room categories | `GET /v2/tags?filter.query=live music venue&feature.semantic_search=true` |
+| 3 | Score every city | `GET /v2/insights?filter.type=urn:heatmap&signal.interests.entities=<artist>&filter.location=POLYGON(…)` (one call per territory) |
+| 4 | Match rooms | `filter.type=urn:entity:place` + `filter.location.query=<city>` + `filter.tags=<room categories>` |
+| 5 | Neighbourhood hotspots | `filter.type=urn:heatmap` + `filter.location.query=<city>` |
+| 6 | Build the bill | `filter.type=urn:entity:artist` + `filter.exclude.entities` + a popularity band (+ `signal.demographics.age` for a younger crowd) |
+| 7 | Brand partners | `filter.type=urn:entity:brand` |
+| 8 | Audience brief | `filter.type=urn:demographics` and `filter.type=urn:tag` + `filter.tag.types` + `diversify.by=subtype` |
 
-Example run, Khruangbin across North America, 7 stops (mock data; the structure is real):
+Steps 1 to 4 and 6 to 8 run as a research pass. An LLM (gpt-oss-120b on Groq, falling back to
+gpt-oss-20b and Qwen, through tool calling) then gets a compact evidence digest with Qloo IDs swapped for
+short aliases. It picks the cities, rooms, bill and brands, and can call `find_venues` (with a room type)
+or `similar_artists` before it calls `submit_tour_plan`. The server then checks the draft: every ID must
+exist in the evidence, the stop count and start city must match, every number cited in a stop reason
+must be that stop's own Qloo number, and any "hidden gem" or "stronghold" label must match its computed
+read. A failing draft goes back once for correction; after that the server drops anything unsupported,
+fills every figure from the evidence ledger, writes the demographic facts itself, routes the stops
+(nearest neighbour plus 2-opt, trying every opener) and validates the plan with zod. If the LLM is
+unavailable the deterministic planner finishes the same evidence, and the plan says so.
 
-```text
-GET /v2/insights?filter.type=urn:heatmap&signal.interests.entities=<id>
-    &filter.location.query=United States&output.heatmap.boundary=urn:entity:locality&take=50
-→ 50 localities · New York 88% / Los Angeles 83% / Denver 57% …
-GET /v2/insights?filter.type=urn:entity:place&signal.interests.entities=<id>
-    &filter.location.query=Austin&filter.tags=<venue tag>&filter.popularity.min=0.75&take=5
-→ Stubb's Waller Creek, Mohawk …
-⇒ 7 stops · 6,015 km · 23 Qloo calls · Itinerary + Markdown/JSON/printable booking sheet
-```
+## Reading the numbers
 
-More screenshots: [timeline](shots/02-agent-timeline.png) · [stop focus](shots/03-stop-focus-hotspots.png) ·
-[Qloo calls](shots/04-qloo-calls.png) · [India](shots/05-india-run.png) · [Europe](shots/06-europe-run.png) ·
-[booking sheet](shots/07-print-booking-sheet.png) · [/how](shots/08-how-qloo-powers-this.png) · [mobile](shots/09-mobile.png)
+A Qloo heatmap's affinity and popularity are percentiles across every cell in the queried area, so
+big cities crowd the top: every primary North American market sits between 0.88 and 1.0. Headliner
+reads both on a log scale of how far into the top a city sits (top 0.1% → 0.98, top 1% → 0.85, top 3%
+→ 0.70, median → 0.15) and compares the fan rank with the popularity rank.
+
+| Read | Rule (Headliner's interpretation, not a Qloo metric) |
+| --- | --- |
+| Hidden gem | fans in the top 3% of the territory and clearly ahead of the local market (headroom ≥ 0.05) |
+| Stronghold | fans in the top 1% |
+| Emerging | fans in the top 7% |
+| Long shot | everything else |
+
+The thresholds were calibrated on live heatmaps for 12 artists across all six territories
+(Khruangbin, Prateek Kuhad, Fred again.., Peggy Gou, AP Dhillon, Morgan Wallen, Bad Bunny, Japanese
+Breakfast, Arlo Parks, Mdou Moctar, Anoushka Shankar, Men I Trust). Mainstream acts get no hidden
+gems, which is the honest answer. The stop score is 80% fan concentration and 20% headroom.
+
+## What building on the API taught us
+
+- `output.heatmap.boundary=urn:entity:locality` returned a 500 on the hackathon host for every area we
+  tried, so cities are read from geohash cells (about 40 km) at their centres instead.
+- A text query like "Europe" resolves to no cells. WKT polygons cover multi-country territories;
+  India works as a country query.
+- `take` is ignored for heatmaps; a territory call returns thousands of cells.
+- Some city names (Shillong) do not resolve as localities, so those calls retry with a 20 km WKT point.
+- Place results carry `query.localities.filter[0].disambiguation`, which Headliner shows as proof of
+  which Portland it searched.
+- Explainability is 1.0 with a single signal and splits almost evenly across a multi-artist bill, so
+  Headliner treats it as provenance rather than insight.
+- The hackathon key allows 5 requests per second and 10,000 per month. The client spaces requests,
+  shares identical in-flight calls, caches packed responses for a week (memory, then Vercel Runtime
+  Cache), and replays an identical run for 7 days. A full uncached run costs about 25 calls.
 
 ## Run it
 
@@ -81,53 +96,52 @@ Requires Node 22+ and pnpm 10.
 
 ```bash
 pnpm install
-cp .env.example .env.local   # add QLOO_API_KEY and optionally GROQ_API_KEY / OPENAI_API_KEY
+cp .env.example .env.local   # add QLOO_API_KEY and GROQ_API_KEY (or OPENAI_API_KEY)
 pnpm dev                     # http://localhost:3000
 ```
 
 | Script | What it does |
 | --- | --- |
-| `pnpm test` | vitest: plan schema, hydration/anti-hallucination, routing, Qloo mapping, HTTP client, mock transport |
+| `pnpm test` | vitest: scoring, city reads, hydration and anti-hallucination checks, routing, mapping on live payload shapes, HTTP client, caching, mock transport |
 | `pnpm typecheck` / `pnpm lint` / `pnpm build` | the usual |
-| `pnpm verify:qloo [artist]` | hits every Qloo endpoint Headliner uses with the real key and prints response shapes |
-| `pnpm shots [url]` | regenerates `shots/` from a running instance (uses the local Chrome, headless) |
-| `pnpm eval:llm [url] [runs]` | runs 10 artist/territory/constraint cases through `/api/plan` and scores validity, latency, tokens and fallbacks |
+| `pnpm verify:qloo [artist]` | hits every Qloo call Headliner makes with the real key and prints shapes (about 12 calls) |
+| `pnpm eval:llm [url] [runs]` | runs 10 artist/territory/constraint cases through `/api/plan` and scores validity, latency and tokens |
+| `pnpm warm [url] [--fresh]` | pre-runs the one-click demos so visitors get instant replays |
+| `pnpm shots [url]` | regenerates `shots/` from a running instance (local Chrome, headless) |
 
-### Environment
-
-All variables are server-side only; none are `NEXT_PUBLIC_`. See [`.env.example`](.env.example).
-
-- `QLOO_API_KEY`: if empty, the app runs on **mock fixtures** and labels them everywhere.
-- `GROQ_API_KEY` or `OPENAI_API_KEY` (or `LLM_PROVIDER` / `LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL` /
-  `LLM_FALLBACK_MODELS` for any OpenAI-compatible endpoint): if none is set, the deterministic planner runs.
-  On Groq the default chain is `openai/gpt-oss-120b` → `openai/gpt-oss-20b` → `qwen/qwen3.8-27b`.
-  Groq's free tier allows 8K tokens per minute per model, and a plan uses about 3–6K.
+All variables are server-side only; none are `NEXT_PUBLIC_`. See [`.env.example`](.env.example). Without
+`QLOO_API_KEY` the app runs on clearly labelled mock fixtures; without an LLM key the deterministic
+planner runs on its own.
 
 ## Project layout
 
 ```text
-src/lib/qloo/        typed client: transport interface, HTTP transport (cache + retries), mock transport, mapping
-src/lib/agent/       tools, evidence ledger, LLM orchestrator, deterministic planner, stream events
-src/lib/plan/        zod schemas, hydration, routing/scoring, Markdown export
-src/components/      globe (R3F + custom shaders), control deck, timeline, itinerary, print sheet
+src/lib/qloo/        typed client: HTTP transport (throttle, cache tiers, quota guard), mapping, mock transport
+src/lib/agent/       tools, evidence ledger, LLM orchestrator, deterministic planner, run replay
+src/lib/plan/        zod schemas, hydration, scoring and routing, Markdown export
+src/lib/cities.ts    185 candidate markets in six territories, plus the territory polygons
+src/components/      globe (React Three Fiber + custom shaders), control deck, timeline, itinerary, print sheet
 src/app/api/plan     POST → NDJSON stream of agent events
 ```
 
-## Limits and honesty
+## Limits
 
-- Scores are Qloo **aggregate** taste affinities for audiences in a place. They are not
-  ticket-sales forecasts and never describe an individual. No personal data is sent to Qloo.
-- The opportunity labels and the stop score are Headliner's interpretation, not Qloo outputs.
-- Venue suggestions are places Qloo associates with the audience. Capacity, availability and
-  routing days still need a human agent.
-- The city catalogue is curated (56 cities). Qloo localities are matched to it by distance.
+- Scores are Qloo **aggregate** taste affinities for audiences in a place. They are not ticket-sales
+  forecasts and never describe an individual. No personal data is sent to Qloo.
+- The labels and the score are Headliner's interpretation of Qloo numbers.
+- Qloo has no venue capacities, so room size is a place-category filter. Availability, capacity, routing
+  days and visas still need a human agent.
+- The city catalogue is curated (185 markets). A city between catalogue entries is only visible as glow
+  on the globe.
+- The free Groq tier allows 200K tokens a day per model; when that runs out, plans come from the
+  deterministic planner and say so.
 
 ## Credits
 
 - Taste data: [Qloo](https://www.qloo.com/) Insights API (hackathon tier).
 - Earth at night: NASA Earth Observatory, **Black Marble 2016** (public domain). See
   [`public/textures/ATTRIBUTION.md`](public/textures/ATTRIBUTION.md).
-- Fonts: Big Shoulders, Instrument Sans and JetBrains Mono (SIL OFL, via Google Fonts).
+- Fonts: Big Shoulders, Instrument Sans and JetBrains Mono (SIL OFL, via Google Fonts). Icons: Phosphor.
 
 ## License
 

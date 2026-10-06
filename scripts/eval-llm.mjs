@@ -5,12 +5,16 @@ import { mkdirSync, writeFileSync } from "node:fs";
 
 const base = process.argv[2] ?? "http://localhost:3123";
 const limit = Number(process.argv[3] ?? 10);
+// Seconds between cases. Groq's free tier allows 8K tokens per minute per model; real visitors are spaced out.
+const gapS = Number(process.env.GAP_S ?? 45);
+// Optional comma-separated artist names to run a subset.
+const only = process.env.ONLY?.split(",").map((s) => s.trim().toLowerCase());
 
 const CASES = [
   { artist: "Khruangbin", region: "north-america", stops: 7 },
   { artist: "Prateek Kuhad", region: "india", stops: 6 },
   { artist: "Fred again..", region: "europe", stops: 9, venueSize: "hall" },
-  { artist: "Japanese Breakfast", region: "asia-pacific", stops: 6, venueSize: "theatre" },
+  { artist: "AP Dhillon", region: "north-america", stops: 6 },
   { artist: "Men I Trust", region: "latin-america", stops: 5, venueSize: "club" },
   { artist: "Arlo Parks", region: "uk-ireland", stops: 5, notes: "Avoid more than one London date; finish in Dublin if the numbers allow.", expectEnd: "dub" },
   { artist: "Peggy Gou", region: "world", stops: 10 },
@@ -21,7 +25,7 @@ const CASES = [
 
 async function runCase(c) {
   const t0 = Date.now();
-  const res = await fetch(`${base}/api/plan`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...c, expectEnd: undefined }) });
+  const res = await fetch(`${base}/api/plan`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...c, expectEnd: undefined, fresh: true }) });
   if (!res.ok) return { case: c, ok: false, error: `HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`, ms: Date.now() - t0 };
   const events = [];
   const decoder = new TextDecoder();
@@ -88,7 +92,9 @@ async function runCase(c) {
 }
 
 const out = [];
-for (const c of CASES.slice(0, limit)) {
+const cases = CASES.slice(0, limit).filter((c) => !only || only.includes(c.artist.toLowerCase()));
+for (const [i, c] of cases.entries()) {
+  if (i > 0 && gapS > 0) await new Promise((r) => setTimeout(r, gapS * 1000));
   const r = await runCase(c);
   out.push(r);
   console.log(

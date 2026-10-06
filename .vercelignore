@@ -1,0 +1,8 @@
+.env*
+!.env.example
+.cache
+eval
+.next
+node_modules
+*.tsbuildinfo
+shots
