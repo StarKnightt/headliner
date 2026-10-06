@@ -276,6 +276,8 @@ const cooldowns = new Map<string, number>();
 const TURN_TOKEN_ESTIMATE = 4000;
 /** How long to wait for the primary model's token window before using a fallback model. */
 const PRIMARY_WAIT_MS = 12_000;
+/** When every model is cooling down, the longest wait before giving up on the LLM for this run. */
+const ALL_COOLING_MAX_WAIT_MS = 15_000;
 
 function coolDown(model: string, ms: number) {
   cooldowns.set(model, Math.max(cooldowns.get(model) ?? 0, Date.now() + ms + 150));
@@ -306,7 +308,8 @@ async function pickModel(llm: LlmConfig, deadline: number): Promise<string> {
   const ready = llm.models.find((m) => (cooldowns.get(m) ?? 0) <= now);
   if (ready) return ready;
   const [model, until] = llm.models.map((m) => [m, cooldowns.get(m)!] as const).sort((a, b) => a[1] - b[1])[0];
-  if (until > deadline) throw new Error(`All LLM models are rate-limited for ${Math.ceil((until - now) / 1000)}s`);
+  // A visitor should not wait out a daily token cap: past a short wait, the deterministic planner finishes.
+  if (until > deadline || until - now > ALL_COOLING_MAX_WAIT_MS) throw new Error(`All LLM models are rate-limited for ${Math.ceil((until - now) / 1000)}s`);
   await sleep(until - now);
   return model;
 }
