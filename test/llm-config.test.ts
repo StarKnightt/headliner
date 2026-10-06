@@ -33,6 +33,21 @@ describe("getLlm", () => {
     expect(c.client.baseURL).toBe("https://llm.example/v1");
   });
 
+  it("adds OpenAI as a metered backup behind Groq", () => {
+    const c = getLlm(env({ GROQ_API_KEY: "g", OPENAI_API_KEY: "o" }))!;
+    expect(c.metered).toBe(false);
+    expect(c.backup).toMatchObject({ provider: "openai", model: "gpt-5.6-luna", metered: true });
+    expect(getLlm(env({ GROQ_API_KEY: "g", OPENAI_API_KEY: "o", OPENAI_FALLBACK: "0" }))!.backup).toBeUndefined();
+    expect(getLlm(env({ GROQ_API_KEY: "g", OPENAI_API_KEY: "o", OPENAI_MODEL: "gpt-5-nano" }))!.backup!.model).toBe("gpt-5-nano");
+  });
+
+  it("falls back to metered OpenAI when Groq is selected but its key is gone", () => {
+    const c = getLlm(env({ LLM_PROVIDER: "groq", LLM_MODEL: "openai/gpt-oss-120b", OPENAI_API_KEY: "o" }))!;
+    expect(c).toMatchObject({ provider: "openai", model: "gpt-5.6-luna", metered: true });
+    expect(c.backup).toBeUndefined();
+    expect(getLlm(env({ LLM_PROVIDER: "groq" }))).toBeNull();
+  });
+
   it("can be disabled explicitly", () => {
     expect(getLlm(env({ LLM_PROVIDER: "none", GROQ_API_KEY: "g" }))).toBeNull();
   });

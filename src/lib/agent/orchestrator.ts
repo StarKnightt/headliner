@@ -11,7 +11,8 @@ import { PlanDraftSchema, type PlanDraft, type PlanRequest, type TourPlan } from
 import { deterministicDraft, f3, gatherEvidence, pickCities } from "./deterministic";
 import type { AgentEvent } from "./events";
 import { EvidenceLedger } from "./ledger";
-import { getLlm, modelOptions, type LlmConfig } from "./llm";
+import { claimMeteredRun } from "./budget";
+import { estimateCostUsd, getLlm, modelOptions, type LlmConfig, type LlmRoute } from "./llm";
 import { executeTool, stepId } from "./runner";
 import { TOOL_BY_NAME, type ToolContext } from "./tools";
 
@@ -20,6 +21,9 @@ type ToolSpec = OpenAI.Chat.Completions.ChatCompletionTool;
 
 const MAX_TURNS = 5;
 const MAX_SUBMIT_FAILURES = 3;
+/** Spend guards for paid routes: completions per run and output tokens per completion. */
+const METERED_MAX_CALLS = 4;
+const METERED_MAX_OUTPUT_TOKENS = 2000;
 /** Whole LLM phase must leave room for the deterministic fallback inside the route's maxDuration. */
 const LLM_BUDGET_MS = 80_000;
 /** Spare cities (beyond the requested stop count) that get venue lookups up front. */
@@ -150,7 +154,7 @@ function systemPrompt(req: PlanRequest) {
     "- Each stop reason: two sentences, like a booking agent's note. First the evidence, citing that city's own numbers exactly as listed (e.g. 'Fans rank in the top 0.8% of North America, affinity 0.992 against 0.976 local popularity, headroom +0.14.'). Then what it means for the date (why this room, what kind of night). Use the city's read label as given; never call a city a hidden gem or stronghold unless its read says so. You may mention a metro-peak note when listed. Pick 1-2 venues per stop from that city's list, preferring real rooms over restaurants or pubs.",
     "- Do not make geographic or historical claims that the evidence does not show.",
     "- Bill: 1 co-headliner and 1-2 support acts from SIMILAR ARTISTS. Brands: 2-3 from BRANDS with a concrete pitch. audienceNotes: 2 notes for the poster and merch designer built from the taste tags only; do not mention age or gender (the server adds those facts).",
-    `- headline: a poster-style tour title (max 8 words) that fits the ${region} run; do not claim a wider geography.`,
+    `- headline: a poster-style tour title (max 8 words) that fits the ${region} run; do not claim a wider geography. If it names a year, use ${new Date().getUTCFullYear()} or later.`,
     "- Affinities are aggregate audience signals, not ticket forecasts or facts about individuals. Write like a seasoned booking agent: concrete, short, no hype.",
     "- The server computes the travel order, so list stops in any order and do not narrate a route in the summary. If the user's constraints name a closing city, set closeCityId; the server will end there.",
     "- summary: 2-3 sentences on why these cities (selection logic and trade-offs), consistent with the numbers.",
@@ -229,25 +233,67 @@ class ToolCallRejected extends Error {}
  * - 429: switch to the next model (separate per-model limits), or wait if the wait is short.
  * - 400 tool_use_failed (provider-side schema check of tool args): surfaced as ToolCallRejected for a corrective retry.
  * - 5xx / timeouts: next model.
+ * - every model on the free route unavailable: continue on the paid backup if today's budget has a slot.
  */
-async function complete(llm: LlmConfig, messages: Msg[], deadline: number, forceSubmit = false): Promise<Completion> {
+async function complete(state: RunState, messages: Msg[], deadline: number, forceSubmit = false): Promise<Completion> {
+  try {
+    return await completeOn(state, messages, deadline, forceSubmit);
+  } catch (err) {
+    const backup = state.llm.backup;
+    if (err instanceof ToolCallRejected || state.route.metered || !backup) throw err;
+    const reason = (err instanceof Error ? err.message : String(err)).replace(/org_\w+/g, "org").slice(0, 160);
+    await switchToMeteredRoute(state, backup, `${state.route.provider} unavailable (${reason})`);
+    return completeOn(state, messages, deadline, forceSubmit);
+  }
+}
+
+/** Which route a run is on, and what it has spent on metered routes. */
+interface RunState {
+  llm: LlmConfig;
+  route: LlmRoute;
+  meteredCalls: number;
+  usage: { input: number; cached: number; output: number };
+  emit: ToolContext["emit"];
+}
+
+async function switchToMeteredRoute(state: RunState, route: LlmRoute, why: string) {
+  const slot = await claimMeteredRun();
+  const name = `${route.provider === "openai" ? "OpenAI" : route.provider} ${route.model}`;
+  if (!slot.ok) {
+    state.emit({ type: "step", id: stepId(), kind: "think", title: `Daily ${name} budget used`, status: "error", detail: `${why}; ${slot.used}/${slot.limit} paid runs today` });
+    throw new Error(`${why}; daily ${name} budget used (${slot.used}/${slot.limit})`);
+  }
+  state.route = route;
+  state.emit({ type: "step", id: stepId(), kind: "think", title: `Continuing on ${name}`, status: "done", detail: `${why} · paid run ${slot.used}/${slot.limit} today` });
+}
+
+async function completeOn(state: RunState, messages: Msg[], deadline: number, forceSubmit: boolean): Promise<Completion> {
+  const route = state.route;
   let lastErr: unknown;
   for (let attempt = 0; attempt < 8; attempt++) {
-    const model = await pickModel(llm, deadline);
+    const model = await pickModel(route, deadline);
+    if (route.metered && state.meteredCalls >= METERED_MAX_CALLS) throw new Error(`Paid LLM call cap reached (${METERED_MAX_CALLS} per run)`);
+    if (route.metered) state.meteredCalls++;
     try {
-      const { data: res, response } = await llm.client.chat.completions
+      const { data: res, response } = await route.client.chat.completions
         .create({
         model,
         messages,
         tools: TOOL_SPECS,
         tool_choice: forceSubmit ? { type: "function", function: { name: "submit_tour_plan" } } : "required",
         parallel_tool_calls: !forceSubmit,
-        max_completion_tokens: 3000,
-        temperature: 0.4,
+        max_completion_tokens: route.metered ? METERED_MAX_OUTPUT_TOKENS : 3000,
+        // GPT-5 before 5.6 only accepts the default temperature.
+        ...(/^gpt-5(?!\.[6-9])/.test(model) ? {} : { temperature: 0.4 }),
         ...modelOptions(model),
       } as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming)
         .withResponse();
       paceFromHeaders(model, response.headers);
+      if (route.metered && res.usage) {
+        state.usage.input += res.usage.prompt_tokens;
+        state.usage.cached += res.usage.prompt_tokens_details?.cached_tokens ?? 0;
+        state.usage.output += res.usage.completion_tokens;
+      }
       const message = res.choices[0]?.message;
       if (!message) throw new Error("LLM returned no message");
       return { message, model, usage: res.usage ?? undefined };
@@ -256,7 +302,10 @@ async function complete(llm: LlmConfig, messages: Msg[], deadline: number, force
       if (err instanceof OpenAI.APIError) {
         const code = (err.error as { code?: string } | undefined)?.code ?? err.code;
         if (err.status === 400 && code === "tool_use_failed") throw new ToolCallRejected(err.message.slice(0, 400));
+        // Out of credit is not a wait-and-retry 429.
+        if (code === "insufficient_quota") throw err;
         if (err.status === 429) {
+          if (route.metered) state.meteredCalls--;
           const wait = retryAfterMs(err);
           console.warn(`[llm] 429 from ${model}, cooling ${Math.round(wait / 1000)}s: ${err.message.replace(/org_\w+/g, "org").slice(0, 220)}`);
           coolDown(model, wait);
@@ -298,7 +347,7 @@ function paceFromHeaders(model: string, h: Headers) {
 }
 
 /** Best available model: the primary unless it is cooling down; waits for the soonest if all are. */
-async function pickModel(llm: LlmConfig, deadline: number): Promise<string> {
+async function pickModel(llm: LlmRoute, deadline: number): Promise<string> {
   const now = Date.now();
   const primaryWait = (cooldowns.get(llm.models[0]) ?? 0) - now;
   if (primaryWait > 0 && primaryWait < PRIMARY_WAIT_MS && now + primaryWait < deadline) {
@@ -425,7 +474,21 @@ function draftProblems(d: PlanDraft, ctx: ToolContext, aliases: AliasBook): stri
 }
 
 async function runLlm(llm: LlmConfig, ctx: ToolContext): Promise<TourPlan> {
+  const state: RunState = { llm, route: llm, meteredCalls: 0, usage: { input: 0, cached: 0, output: 0 }, emit: ctx.emit };
+  try {
+    return await runTurns(state, ctx);
+  } finally {
+    const { input, cached, output } = state.usage;
+    if (input || output) {
+      const usd = estimateCostUsd(state.route.model, input, cached, output);
+      console.log(`[llm] metered ${state.route.model}: ${state.meteredCalls} calls, ${input} in (${cached} cached) + ${output} out${usd === null ? "" : `, ~$${usd.toFixed(4)}`} · ${ctx.request.artist}`);
+    }
+  }
+}
+
+async function runTurns(state: RunState, ctx: ToolContext): Promise<TourPlan> {
   const deadline = Date.now() + LLM_BUDGET_MS;
+  if (state.route.metered) await switchToMeteredRoute(state, state.route, "Paid LLM is the only planner configured");
   const shortlist = await research(ctx);
   const aliases = new AliasBook();
   const messages: Msg[] = [
@@ -438,7 +501,7 @@ async function runLlm(llm: LlmConfig, ctx: ToolContext): Promise<TourPlan> {
   let forced = false;
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     // The last two turns may only submit: lookups are closed so the run always ends in a plan.
-    const force = turn >= MAX_TURNS - 2;
+    const force = turn >= MAX_TURNS - 2 || (state.route.metered && state.meteredCalls >= METERED_MAX_CALLS - 2);
     if (force && !forced) {
       forced = true;
       messages.push({ role: "user", content: "Lookups are closed. Call submit_tour_plan now with the evidence you have, following every rule." });
@@ -449,7 +512,7 @@ async function runLlm(llm: LlmConfig, ctx: ToolContext): Promise<TourPlan> {
     const t0 = performance.now();
     let res: Completion;
     try {
-      res = await complete(llm, messages, deadline, force);
+      res = await complete(state, messages, deadline, force);
     } catch (err) {
       if (!(err instanceof ToolCallRejected)) {
         ctx.emit({ type: "step", id: thinkId, kind: "think", title, status: "error", detail: (err as Error).message.slice(0, 200) });
@@ -513,7 +576,7 @@ async function runLlm(llm: LlmConfig, ctx: ToolContext): Promise<TourPlan> {
       continue;
     }
     if (!parsed?.success) throw new Error("unreachable");
-    return finish(parsed.data, ctx, aliases, `${llm.provider}:${res.model}`, vid);
+    return finish(parsed.data, ctx, aliases, `${state.route.provider}:${res.model}`, vid);
   }
   throw new Error("Agent ran out of turns before submitting a valid plan");
 }
