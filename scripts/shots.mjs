@@ -31,8 +31,8 @@ async function desktop() {
   await sleep(4000);
   await page.screenshot({ path: file("01-desktop-overview.png") });
   // Social preview (1.91:1) straight from the live view.
-  const og = new URL("../src/app/opengraph-image.png", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
-  await page.screenshot({ path: og, clip: { x: 0, y: 0, width: 1500, height: 785 } });
+  const og = new URL("../src/app/opengraph-image.jpg", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
+  await page.screenshot({ path: og, type: "jpeg", quality: 82, clip: { x: 0, y: 0, width: 1500, height: 785 } });
 
   await page.getByRole("tab", { name: /Soundcheck/ }).click();
   await page.locator(`${panel} button:has-text("show")`).nth(2).click().catch(() => {});

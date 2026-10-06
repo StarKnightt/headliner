@@ -535,6 +535,25 @@ function CameraRig({ target, distance, idle }: { target: THREE.Vector3; distance
   return null;
 }
 
+/**
+ * Aim between the run's two farthest-apart stops (blended with the average), so a run with most stops
+ * at one end still fits in frame.
+ */
+function framingDirection(stops: GlobeStop[]): THREE.Vector3 {
+  const centroid = centroidDirection(stops);
+  const dirs = stops.map((s) => latLngToVec3(s.lat, s.lng).normalize());
+  let pair: [number, number] = [0, 0];
+  let widest = -1;
+  for (let i = 0; i < dirs.length; i++)
+    for (let j = i + 1; j < dirs.length; j++) {
+      const a = dirs[i].angleTo(dirs[j]);
+      if (a > widest) [widest, pair] = [a, [i, j]];
+    }
+  const mid = dirs[pair[0]].clone().add(dirs[pair[1]]);
+  if (stops.length < 2 || mid.lengthSq() < 1e-3) return centroid;
+  return mid.normalize().multiplyScalar(0.7).add(centroid.multiplyScalar(0.3)).normalize();
+}
+
 /** Shift the projection so the globe's centre sits in the space between the side panels. */
 function ViewOffset({ inset }: { inset?: { left: number; right: number } }) {
   const camera = useThree((s) => s.camera) as THREE.PerspectiveCamera;
@@ -557,7 +576,7 @@ function Scene({ markers, stops, heat, focusIndex, home, onSelectStop, idle, ins
       const v = latLngToVec3(focus.lat - 6, focus.lng, 1).normalize();
       return v;
     }
-    if (stops.length) return centroidDirection(stops);
+    if (stops.length) return framingDirection(stops);
     return latLngToVec3(home.lat, home.lng).normalize();
   }, [focus, stops, home.lat, home.lng]);
   // Pull back for spread-out runs (a world tour) and for narrow phone viewports.

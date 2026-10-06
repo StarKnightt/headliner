@@ -196,7 +196,7 @@ export default function Headliner({ qlooMode, agentLabel }: { qlooMode: "live" |
             focusIndex={focus}
             home={home}
             onSelectStop={focusStop}
-            idle={!running && focus === null}
+            idle={!running && focus === null && !plan}
             inset={desktop ? DESKTOP_INSET : undefined}
           />
           <div className="pointer-events-none absolute inset-x-0 bottom-0 h-20 bg-gradient-to-t from-night to-transparent lg:hidden" />
