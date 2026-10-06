@@ -41,6 +41,9 @@ export interface RawTag {
 
 export interface RawGeocode {
   name?: string;
+  city?: string;
+  metro?: string;
+  country?: string;
   admin1_region?: string;
   admin2_region?: string;
   country_code?: string;
@@ -145,9 +148,16 @@ export interface InsightsParams {
   "signal.location.query"?: string;
   "signal.demographics.age"?: string;
   "signal.demographics.audiences"?: string;
+  /** WKT POINT/POLYGON or a locality id. */
+  "filter.location"?: string;
   "filter.location.query"?: string;
   "filter.location.radius"?: number;
   "filter.tags"?: string;
+  "operator.filter.tags"?: "union" | "intersection";
+  /** urn:tag insights only: restrict to these tag subtypes. */
+  "filter.tag.types"?: string;
+  "diversify.by"?: string;
+  "diversify.take"?: number;
   "filter.exclude.entities"?: string;
   "filter.results.entities"?: string;
   "filter.popularity.min"?: number;

@@ -3,7 +3,7 @@
  * deterministic, raw-shaped fixture data. Used only when QLOO_API_KEY is absent. Nothing here is
  * Qloo data; every response carries `mock: true` and the UI shows a MOCK DATA banner.
  */
-import { CITIES, findCity, type City } from "../../cities";
+import { CITIES, findCity, HEAT_AREAS, type City, type Region } from "../../cities";
 import type {
   AudiencesParams,
   AudiencesResponse,
@@ -163,18 +163,14 @@ function overlap(a: string[], b: string[]) {
   return inter / Math.max(1, new Set([...a, ...b]).size);
 }
 
-const COUNTRY_QUERIES: Record<string, string[]> = {
-  "united states": ["US"], canada: ["CA"], mexico: ["MX"], brazil: ["BR"], argentina: ["AR"], colombia: ["CO"],
-  chile: ["CL"], europe: ["FR", "DE", "NL", "ES", "PT", "DK", "SE", "IT", "BE", "CZ", "PL"], "united kingdom": ["GB"],
-  ireland: ["IE"], japan: ["JP"], "south korea": ["KR"], "southeast asia": ["SG", "TH", "PH", "ID"], australia: ["AU"],
-  "new zealand": ["NZ"], india: ["IN"],
-};
-
-function citiesWithin(query: string): City[] {
-  const codes = COUNTRY_QUERIES[query.trim().toLowerCase()];
-  if (codes) return CITIES.filter((c) => codes.includes(c.country));
-  const city = findCity(query);
-  return city ? [city] : [];
+/** Which territory a heatmap request covers (by its WKT polygon or country query), if any. */
+function territoryOf(params: InsightsParams): Region | null {
+  const wkt = params["filter.location"];
+  const query = params["filter.location.query"]?.trim().toLowerCase();
+  for (const [region, area] of Object.entries(HEAT_AREAS) as [Region, (typeof HEAT_AREAS)[Region]][]) {
+    if ((wkt && area.wkt === wkt) || (query && area.query?.toLowerCase() === query)) return region;
+  }
+  return null;
 }
 
 // ---------- transport ----------
@@ -204,11 +200,12 @@ export class MockQlooTransport implements QlooTransport {
     await this.delay(`tags:${params["filter.query"]}`);
     const q = params["filter.query"].toLowerCase();
     const venueTags: RawTag[] = [
-      { id: "urn:tag:category:place:music_venue", name: "Music Venue", type: "urn:tag:category:place" },
-      { id: "urn:tag:category:place:concert_hall", name: "Concert Hall", type: "urn:tag:category:place" },
-      { id: "urn:tag:category:place:live_music_venue", name: "Live Music Venue", type: "urn:tag:category:place" },
-      { id: "urn:tag:category:place:jazz_club", name: "Jazz Club", type: "urn:tag:category:place" },
-      { id: "urn:tag:category:place:night_club", name: "Night Club", type: "urn:tag:category:place" },
+      { id: "urn:tag:category:place:live_music_venue", name: "Live music venue", type: "urn:tag:category:place" },
+      { id: "urn:tag:category:place:concert_hall", name: "Concert hall", type: "urn:tag:category:place" },
+      { id: "urn:tag:category:place:performing_arts_theater", name: "Performing arts theater", type: "urn:tag:category:place" },
+      { id: "urn:tag:category:place:jazz_club", name: "Jazz club", type: "urn:tag:category:place" },
+      { id: "urn:tag:category:place:night_club", name: "Night club", type: "urn:tag:category:place" },
+      { id: "urn:tag:category:place:arena", name: "Arena", type: "urn:tag:category:place" },
     ];
     const slug = q.replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
     const tags = /venue|music|concert|club|gig|live/.test(q)
@@ -262,21 +259,20 @@ export class MockQlooTransport implements QlooTransport {
   }
 
   private heatmap(a: ArtistRecord, params: InsightsParams, take: number): RawHeatmapPoint[] {
-    const within = params["filter.location.query"] ?? "";
-    if (params["output.heatmap.boundary"]) {
-      return citiesWithin(within)
+    const territory = territoryOf(params);
+    if (territory) {
+      // One precision-4 cell per catalogue city, squeezed into the top of the range like live data.
+      return CITIES.filter((c) => c.region === territory)
         .map((c) => {
           const s = mockCityScore(a, c);
           return {
-            name: c.name,
-            entity_id: mockId(`locality:${c.id}`),
-            location: { latitude: c.lat, longitude: c.lng, geohash: geohash(c.lat, c.lng, 5) },
-            query: { affinity: s.affinity, affinity_rank: s.affinity, popularity: s.popularity },
+            location: { latitude: c.lat, longitude: c.lng, geohash: geohash(c.lat, c.lng, 4) },
+            query: { affinity: round(0.82 + 0.18 * s.affinity), affinity_rank: round(0.7 + 0.3 * s.affinity), popularity: round(0.84 + 0.16 * s.popularity) },
           };
         })
-        .sort((x, y) => y.query.affinity - x.query.affinity)
-        .slice(0, take);
+        .sort((x, y) => y.query.affinity - x.query.affinity);
     }
+    const within = params["filter.location.query"] ?? "";
     const city = findCity(within);
     if (!city) return [];
     const s = mockCityScore(a, city);
@@ -358,8 +354,12 @@ export class MockQlooTransport implements QlooTransport {
   private venues(a: ArtistRecord, city: City, params: InsightsParams, take: number): RawEntity[] {
     const min = params["filter.popularity.min"] ?? 0;
     const max = params["filter.popularity.max"] ?? 1;
-    const tierPop = { club: 0.62, theatre: 0.8, hall: 0.92 } as const;
-    const tierTag = { club: "Club", theatre: "Theatre", hall: "Concert Hall" } as const;
+    const tierPop = { club: 0.9, theatre: 0.95, hall: 0.985 } as const;
+    const tierTag = {
+      club: ["urn:tag:category:place:night_club", "Night club"],
+      theatre: ["urn:tag:category:place:performing_arts_theater", "Performing arts theater"],
+      hall: ["urn:tag:category:place:concert_hall", "Concert hall"],
+    } as const;
     return (MOCK_VENUES[city.id] ?? [])
       .map(([name, tier, address]) => {
         const seed = `${city.id}:${name}`;
@@ -381,8 +381,8 @@ export class MockQlooTransport implements QlooTransport {
             business_rating: round(3.9 + rand(`${seed}:rating`) * 1.0, 1),
           },
           tags: [
-            { id: "urn:tag:category:place:music_venue", name: "Music Venue" },
-            { id: `urn:tag:category:place:${tier}`, name: tierTag[tier] },
+            { id: tierTag[tier][0], name: tierTag[tier][1], type: "urn:tag:category:place" },
+            { id: "urn:tag:category:place:live_music_venue", name: "Live music venue", type: "urn:tag:category:place" },
           ],
           query: { affinity, explainability: this.explain(a, seed) },
         } satisfies RawEntity;

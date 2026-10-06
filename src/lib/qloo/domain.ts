@@ -10,14 +10,22 @@ export interface TasteEntity {
   affinity: number | null;
   description: string | null;
   imageUrl: string | null;
-  tags: { id: string; name: string }[];
+  tags: { id: string; name: string; type?: string }[];
   /** From feature.explainability: which input entities drove this result. */
   explainedBy: { entityId: string; score: number }[];
 }
 
 export interface Place extends TasteEntity {
   address: string | null;
+  /** properties.geocode.city (or name) */
   city: string | null;
+  /** properties.geocode.name: usually the neighbourhood */
+  neighborhood: string | null;
+  /** Qloo place category matched by the room-type filter, e.g. "Live music venue" */
+  category: string | null;
+  /** The place's first Qloo category, e.g. "Afghan restaurant" for a restaurant that also hosts gigs. */
+  primaryCategory: string | null;
+  website: string | null;
   lat: number | null;
   lng: number | null;
   businessRating: number | null;
@@ -28,20 +36,29 @@ export interface HeatCell {
   lng: number;
   geohash: string | null;
   name: string | null;
+  /** Qloo heatmap affinity: percentile of this cell among all cells in the queried area. */
   affinity: number;
   affinityRank: number;
+  /** Qloo heatmap popularity: percentile of signal volume among cells in the queried area. */
   popularity: number;
 }
 
 export interface CityAffinity {
   cityId: string;
-  /** Qloo affinity of the artist for audiences in this locality, 0..1 (null = no data). */
+  /** Affinity of the heatmap cell the city centre falls in (percentile within the territory), null = no data. */
   affinity: number | null;
-  /** Artist popularity percentile within the locality, 0..1 (null = no data). */
+  /** Popularity of that cell (percentile within the territory), null = no data. */
   popularity: number | null;
-  /** Locality Qloo resolved the query to, for provenance. */
+  /** Best cell within 35 km of the centre, for metros whose fans sit outside the core. */
+  peakAffinity: number | null;
+  peakKm: number | null;
+  /** Geohash of the cell used. */
+  cell: string | null;
+  /** Territory the percentiles are relative to, e.g. "North America". */
+  area: string;
+  /** Locality Qloo resolved this city's name to (from the venue lookup), for provenance. */
   resolvedLocality: string | null;
-  method: "insights-location" | "heatmap-locality";
+  method: "heatmap-geohash";
 }
 
 export interface Demographics {
