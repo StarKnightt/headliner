@@ -25,20 +25,28 @@ export async function getRun(key: string): Promise<RecordedRun | null> {
   if (hit) return hit;
   const stored = (await durable()?.get(key)) as RecordedRun | null | undefined;
   if (stored?.plan && Array.isArray(stored.events)) {
-    if (!stored.plan.mode.agent.includes("fallback")) memory.set(key, stored);
+    if (!isFallback(stored)) memory.set(key, stored);
     return stored;
   }
   return null;
 }
 
-/** Plans the LLM wrote are kept for a week; deterministic fallbacks only briefly, so a later run can use the LLM. */
+const isFallback = (run: RecordedRun) => run.plan.mode.agent.includes("fallback");
+
+/**
+ * Plans the LLM wrote are kept for a week; deterministic fallbacks only briefly, so a later run can use
+ * the LLM. A fallback never replaces a recording the LLM wrote.
+ */
 export async function putRun(key: string, run: RecordedRun) {
-  const fallback = run.plan.mode.agent.includes("fallback");
-  if (!fallback) {
-    if (memory.size > 200) memory.delete(memory.keys().next().value!);
-    memory.set(key, run);
+  if (isFallback(run)) {
+    const existing = await getRun(key);
+    if (existing && !isFallback(existing)) return;
+    await durable()?.set(key, run, 30 * 60);
+    return;
   }
-  await durable()?.set(key, run, fallback ? 30 * 60 : TTL_S);
+  if (memory.size > 200) memory.delete(memory.keys().next().value!);
+  memory.set(key, run);
+  await durable()?.set(key, run, TTL_S);
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));

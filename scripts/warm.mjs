@@ -9,9 +9,10 @@ const gapS = Number(process.env.GAP_S ?? 60);
 
 // The demo list lives in the UI; parse it so the two never drift apart.
 const src = readFileSync(new URL("../src/components/ControlDeck.tsx", import.meta.url), "utf8");
-const demos = [...src.matchAll(/req: (\{ artist: "[^"]+", region: "[^"]+", stops: \d+, venueSize: "[^"]+" \})/g)].map((m) =>
-  JSON.parse(m[1].replace(/(\w+):/g, '"$1":')),
-);
+const only = process.env.ONLY?.split(",").map((s) => s.trim().toLowerCase());
+const demos = [...src.matchAll(/req: (\{ artist: "[^"]+", region: "[^"]+", stops: \d+, venueSize: "[^"]+" \})/g)]
+  .map((m) => JSON.parse(m[1].replace(/(\w+):/g, '"$1":')))
+  .filter((d) => !only || only.includes(d.artist.toLowerCase()));
 
 for (const [i, req] of demos.entries()) {
   const t0 = Date.now();
