@@ -6,10 +6,15 @@ const display = Big_Shoulders({ subsets: ["latin"], weight: ["600", "800", "900"
 const sans = Instrument_Sans({ subsets: ["latin"], variable: "--nf-body" });
 const mono = JetBrains_Mono({ subsets: ["latin"], weight: ["400", "500", "700"], variable: "--nf-data" });
 
+const description =
+  "A booking agent for independent artists. Qloo taste data finds the cities where your fans already rank highest, the rooms they go to, the acts they share and the brands they love.";
+
 export const metadata: Metadata = {
+  metadataBase: new URL("https://headliner-five.vercel.app"),
   title: "Headliner · Tour where your fans already are",
-  description:
-    "A tour-routing agent for independent artists. Qloo taste data finds the cities, rooms, co-headliners and brand partners that match your audience, on a 3D night globe.",
+  description,
+  openGraph: { title: "Headliner · Tour where your fans already are", description, type: "website", siteName: "Headliner" },
+  twitter: { card: "summary_large_image", title: "Headliner · Tour where your fans already are", description },
 };
 
 export const viewport: Viewport = { themeColor: "#07080c", colorScheme: "dark" };

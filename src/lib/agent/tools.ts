@@ -91,8 +91,10 @@ const scoreCities = defineTool({
     cityIds: z.array(z.string()).max(80).optional().describe("Optional explicit candidate cityIds; default is the requested region's catalogue"),
   }),
   title: (a, ctx) => {
-    const n = a.cityIds?.length ?? citiesForRegion(ctx.request.region).length;
-    const area = ctx.request.region === "world" ? "five territories" : HEAT_AREAS[ctx.request.region].label;
+    const cities = a.cityIds?.length ? resolveCities(a.cityIds) : citiesForRegion(ctx.request.region);
+    const n = cities.length;
+    const territories = new Set(cities.map((c) => c.region));
+    const area = territories.size > 1 ? `${territories.size} territories` : HEAT_AREAS[cities[0]?.region ?? "north-america"].label;
     return `Mapping fan affinity across ${area} (${n} cities)`;
   },
   async run(a, ctx) {

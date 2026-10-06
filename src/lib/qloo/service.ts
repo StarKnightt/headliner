@@ -186,7 +186,7 @@ export class QlooService {
   }
 
   /**
-   * Fan affinity per candidate city: one territory heatmap per region (1 call for most runs, 5 for a
+   * Fan affinity per candidate city: one territory heatmap per region (1 call for most runs, 6 for a
    * world tour), read at each city centre. Returns the territory's strongest cells for the globe too.
    */
   async scoreCities(artistId: string, cities: City[]): Promise<Traced<CityAffinity[]> & { cells: HeatCell[] }> {
