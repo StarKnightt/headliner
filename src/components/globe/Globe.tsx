@@ -4,6 +4,7 @@ import { OrbitControls, Stars, useTexture } from "@react-three/drei";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Suspense, useEffect, useMemo, useRef, type RefObject } from "react";
 import * as THREE from "three";
+import { pctIndex } from "@/lib/plan/routing";
 import { arcCurve, centroidDirection, latLngToVec3, OPPORTUNITY_COLOR } from "./geo";
 
 export interface GlobeMarker {
@@ -23,11 +24,15 @@ export interface GlobeStop extends GlobeMarker {
 export interface GlobeProps {
   markers: GlobeMarker[];
   stops: GlobeStop[];
+  /** Territory heatmap cells from Qloo: [lat, lng, affinity percentile]. */
+  heat: [number, number, number][];
   focusIndex: number | null;
   /** Direction to face when there is nothing to focus (region centre). */
   home: { lat: number; lng: number };
   onSelectStop?: (index: number) => void;
   idle: boolean;
+  /** Pixels covered by panels on each side (desktop), so the globe centres in the free space. */
+  inset?: { left: number; right: number };
 }
 
 // ---------------- earth ----------------
@@ -47,6 +52,7 @@ void main() {
 const earthFrag = /* glsl */ `
 uniform sampler2D uMap;
 uniform float uTime;
+uniform float uDim;
 varying vec2 vUv;
 varying vec3 vNormalV;
 varying vec3 vViewDir;
@@ -56,7 +62,9 @@ void main() {
   float lights = smoothstep(0.16, 0.85, l);
   vec3 land = c * vec3(0.42, 0.5, 0.78);
   vec3 warm = mix(vec3(1.0, 0.48, 0.12), vec3(1.0, 0.86, 0.62), smoothstep(0.55, 1.0, l));
-  vec3 col = land + warm * lights * 1.35;
+  // Once Qloo's fan heat is on the map, city lights cool and dim so the fans are the light source.
+  vec3 cool = vec3(0.55, 0.62, 0.78);
+  vec3 col = land * (1.0 - 0.25 * uDim) + mix(warm, cool, uDim) * lights * mix(1.35, 0.42, uDim);
   float fres = pow(1.0 - max(dot(vNormalV, vViewDir), 0.0), 2.6);
   col += vec3(0.18, 0.34, 0.85) * fres * 0.55;
   gl_FragColor = vec4(col, 1.0);
@@ -76,18 +84,23 @@ void main() {
   gl_FragColor = vec4(vec3(0.28, 0.46, 1.0) * i * 1.6 + vec3(1.0, 0.45, 0.12) * i * 0.18, i);
 }`;
 
-function Earth() {
+function Earth({ dim }: { dim: boolean }) {
   const isSmall = typeof window !== "undefined" && window.innerWidth < 900;
   const map = useTexture(isSmall ? "/textures/earth-night-2k.jpg" : "/textures/earth-night-4k.jpg", (t) => {
     t.anisotropy = 8;
     t.needsUpdate = true;
   });
-  const uniforms = useMemo(() => ({ uMap: { value: map }, uTime: { value: 0 } }), [map]);
+  const uniforms = useMemo(() => ({ uMap: { value: map }, uTime: { value: 0 }, uDim: { value: 0 } }), [map]);
+  const mat = useRef<THREE.ShaderMaterial>(null);
+  useFrame((_, dt) => {
+    const u = mat.current?.uniforms.uDim;
+    if (u) u.value += ((dim ? 1 : 0) - u.value) * Math.min(1, dt * 2.2);
+  });
   return (
     <group>
       <mesh>
         <sphereGeometry args={[1, 128, 128]} />
-        <shaderMaterial vertexShader={earthVert} fragmentShader={earthFrag} uniforms={uniforms} />
+        <shaderMaterial ref={mat} vertexShader={earthVert} fragmentShader={earthFrag} uniforms={uniforms} />
       </mesh>
       <mesh scale={1.13}>
         <sphereGeometry args={[1, 64, 64]} />
@@ -135,7 +148,7 @@ function CityDot({ m, isStop }: { m: GlobeMarker; isStop: boolean }) {
     const t = Math.min(1, (clock.elapsedTime - born.current) / 0.6);
     ref.current.scale.setScalar(1 - Math.pow(1 - t, 3));
   });
-  const r = 0.006 + m.affinity * 0.012;
+  const r = 0.004 + pctIndex(m.affinity) * 0.012;
   return (
     <group ref={ref} position={pos}>
       <mesh rotation-x={-Math.PI / 2}>
@@ -154,7 +167,7 @@ function StopPillar({ s, active, onClick }: { s: GlobeStop; active: boolean; onC
   const group = useRef<THREE.Group>(null);
   const pulse = useRef<THREE.Mesh>(null);
   const pos = useMemo(() => latLngToVec3(s.lat, s.lng, 1.0), [s.lat, s.lng]);
-  const height = 0.05 + s.affinity * 0.2;
+  const height = 0.05 + pctIndex(s.affinity) * 0.2;
   const color = OPPORTUNITY_COLOR[s.opportunity] ?? "#ff7a1a";
   useEffect(() => {
     if (group.current) orientOutward(group.current, pos);
@@ -184,6 +197,72 @@ function StopPillar({ s, active, onClick }: { s: GlobeStop; active: boolean; onC
   );
 }
 
+// ---------------- Qloo fan heat ----------------
+
+function glowTexture() {
+  const c = document.createElement("canvas");
+  c.width = c.height = 64;
+  const g = c.getContext("2d")!;
+  const grd = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+  grd.addColorStop(0, "rgba(255,255,255,1)");
+  grd.addColorStop(0.3, "rgba(255,255,255,0.6)");
+  grd.addColorStop(1, "rgba(255,255,255,0)");
+  g.fillStyle = grd;
+  g.fillRect(0, 0, 64, 64);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+
+/** Ember to sodium to warm white, by how far into the territory's top the cell sits. */
+function heatColor(t: number, out: THREE.Color) {
+  const ember = [0.42, 0.11, 0.03];
+  const sodium = [1.0, 0.45, 0.09];
+  const white = [1.0, 0.92, 0.78];
+  const [a, b, k] = t < 0.6 ? [ember, sodium, t / 0.6] : [sodium, white, (t - 0.6) / 0.4];
+  return out.setRGB(a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k);
+}
+
+/** Territory heatmap cells (geohash precision 4, about 40 km) as soft glows on the surface. */
+function HeatField({ heat }: { heat: [number, number, number][] }) {
+  const mesh = useRef<THREE.InstancedMesh>(null);
+  const mat = useRef<THREE.MeshBasicMaterial>(null);
+  const tex = useMemo(() => glowTexture(), []);
+  const born = useRef<number | null>(null);
+  useEffect(() => () => tex.dispose(), [tex]);
+  useEffect(() => {
+    born.current = null;
+    if (!mesh.current) return;
+    heat.forEach(([lat, lng, a], i) => {
+      const dir = latLngToVec3(lat, lng, 1).normalize();
+      // Percentiles above 0.8 only; spread the top on the same log scale the planner uses.
+      const t = Math.max(0, Math.min(1, 1 - Math.log10(1 + 99 * (1 - a)) / 2 - 0.25) / 0.75);
+      _o.position.copy(dir).multiplyScalar(1.0016);
+      _o.quaternion.setFromUnitVectors(Z, dir);
+      const s = 0.0075 + t * 0.0065;
+      _o.scale.set(s, s, 1);
+      _o.updateMatrix();
+      mesh.current!.setMatrixAt(i, _o.matrix);
+      mesh.current!.setColorAt(i, heatColor(t, _c));
+    });
+    mesh.current.instanceMatrix.needsUpdate = true;
+    if (mesh.current.instanceColor) mesh.current.instanceColor.needsUpdate = true;
+  }, [heat]);
+  useFrame(({ clock }) => {
+    if (!mat.current) return;
+    if (born.current === null) born.current = clock.elapsedTime;
+    const t = Math.min(1, (clock.elapsedTime - born.current) / 1.4);
+    mat.current.opacity = 0.9 * (1 - Math.pow(1 - t, 3));
+  });
+  if (!heat.length) return null;
+  return (
+    <instancedMesh key={heat.length} ref={mesh} args={[undefined, undefined, heat.length]} frustumCulled={false}>
+      <planeGeometry args={[1, 1]} />
+      <meshBasicMaterial ref={mat} map={tex} transparent opacity={0} depthWrite={false} blending={THREE.AdditiveBlending} toneMapped={false} />
+    </instancedMesh>
+  );
+}
+
 const HOT_MAG = 7;
 
 function Hotspots({ stop }: { stop: GlobeStop }) {
@@ -191,10 +270,14 @@ function Hotspots({ stop }: { stop: GlobeStop }) {
   const count = stop.hotspots.length;
   const born = useRef<number | null>(null);
   const data = useMemo(() => {
+    // City heatmaps put the top cells near 1.0; rescale within the stop so the peaks stand out.
+    const as = stop.hotspots.map((h) => h.affinity);
+    const lo = Math.min(...as);
+    const span = Math.max(1e-3, Math.max(...as) - lo);
     return stop.hotspots.map((h) => {
       const lat = stop.lat + (h.lat - stop.lat) * HOT_MAG;
       const lng = stop.lng + (h.lng - stop.lng) * HOT_MAG;
-      return { dir: latLngToVec3(lat, lng, 1), a: h.affinity };
+      return { dir: latLngToVec3(lat, lng, 1), a: 0.35 + 0.65 * ((h.affinity - lo) / span) };
     });
   }, [stop]);
   useEffect(() => {
@@ -272,7 +355,7 @@ function LabelProjector({ stops, focusIndex, layer }: { stops: GlobeStop[]; focu
         index: i,
         affinity: s.affinity,
         surface: latLngToVec3(s.lat, s.lng, 1),
-        top: latLngToVec3(s.lat, s.lng, 1.07 + s.affinity * 0.2),
+        top: latLngToVec3(s.lat, s.lng, 1.07 + pctIndex(s.affinity) * 0.2),
       })),
     [stops],
   );
@@ -452,9 +535,22 @@ function CameraRig({ target, distance, idle }: { target: THREE.Vector3; distance
   return null;
 }
 
+/** Shift the projection so the globe's centre sits in the space between the side panels. */
+function ViewOffset({ inset }: { inset?: { left: number; right: number } }) {
+  const camera = useThree((s) => s.camera) as THREE.PerspectiveCamera;
+  const size = useThree((s) => s.size);
+  useEffect(() => {
+    const shift = inset ? (inset.right - inset.left) / 2 : 0;
+    if (shift) camera.setViewOffset(size.width, size.height, shift, 0, size.width, size.height);
+    else camera.clearViewOffset();
+    camera.updateProjectionMatrix();
+  }, [camera, size.width, size.height, inset]);
+  return null;
+}
+
 // ---------------- scene ----------------
 
-function Scene({ markers, stops, focusIndex, home, onSelectStop, idle, layer }: GlobeProps & { layer: RefObject<HTMLDivElement | null> }) {
+function Scene({ markers, stops, heat, focusIndex, home, onSelectStop, idle, inset, layer }: GlobeProps & { layer: RefObject<HTMLDivElement | null> }) {
   const focus = focusIndex !== null ? stops[focusIndex] : null;
   const target = useMemo(() => {
     if (focus) {
@@ -464,7 +560,11 @@ function Scene({ markers, stops, focusIndex, home, onSelectStop, idle, layer }: 
     if (stops.length) return centroidDirection(stops);
     return latLngToVec3(home.lat, home.lng).normalize();
   }, [focus, stops, home.lat, home.lng]);
-  const distance = focus ? 1.9 : stops.length ? 2.9 : 3.2;
+  // Pull back for spread-out runs (a world tour) and for narrow phone viewports.
+  const aspect = useThree((s) => s.size.width / Math.max(1, s.size.height));
+  const spread = useMemo(() => (stops.length ? Math.max(...stops.map((s) => latLngToVec3(s.lat, s.lng).normalize().angleTo(target))) : 0), [stops, target]);
+  const runDistance = Math.min(3.8, Math.max(2.7, 2.35 + spread * 2.5));
+  const distance = (focus ? 1.9 : stops.length ? runDistance : 3.2) * (aspect < 1.25 ? 1.3 : 1);
   const stopIds = useMemo(() => new Set(stops.map((s) => s.id)), [stops]);
   const epoch = useMemo(() => stops.map((s) => s.id).join("|").length + stops.length, [stops]);
 
@@ -473,8 +573,9 @@ function Scene({ markers, stops, focusIndex, home, onSelectStop, idle, layer }: 
       <color attach="background" args={["#05060a"]} />
       <Stars radius={60} depth={30} count={2500} factor={2.2} saturation={0} fade speed={0.4} />
       <Suspense fallback={null}>
-        <Earth />
+        <Earth dim={heat.length > 0} />
       </Suspense>
+      <HeatField heat={heat} />
       {markers.map((m) => (
         <CityDot key={m.id} m={m} isStop={stopIds.has(m.id)} />
       ))}
@@ -498,6 +599,7 @@ function Scene({ markers, stops, focusIndex, home, onSelectStop, idle, layer }: 
         autoRotateSpeed={0.35}
       />
       <CameraRig target={target} distance={distance} idle={idle} />
+      <ViewOffset inset={inset} />
     </>
   );
 }
